@@ -255,7 +255,7 @@ async function exportDialog(app, format) {
 function aboutDialog() {
   dialog('ABOUT', (body) => {
     body.appendChild(el('div', 'about-hero', 'DEAD<em>PIXEL</em>'));
-    body.appendChild(el('div', 'about-osd', 'RASTER SURGERY SUITE · v1.0'));
+    body.appendChild(el('div', 'about-osd', 'RASTER SURGERY SUITE · v1.1'));
     body.appendChild(el('div', 'dlg-note',
       'A full-blooded image editor running entirely in your browser. Nothing you make here ever leaves your machine — no uploads, no accounts, no telemetry. Just you and the pixels.<br><br>' +
       'A transmission from <a href="https://deadplug.digital" target="_blank" rel="noopener">deadplug.digital</a> · CH.404'));
@@ -263,7 +263,7 @@ function aboutDialog() {
 }
 function shortcutsDialog() {
   const rows = [
-    ['V', 'Move'], ['M', 'Marquee'], ['L', 'Lasso'], ['W', 'Magic wand'], ['C', 'Crop'],
+    ['V', 'Move'], ['M', 'Marquee'], ['L', 'Lasso'], ['W', 'Magic wand'], ['Q', 'Select by color'], ['C', 'Crop'],
     ['I', 'Eyedropper'], ['B', 'Brush'], ['N', 'Pencil'], ['E', 'Eraser'], ['S', 'Clone stamp'],
     ['U', 'Smudge'], ['G', 'Fill / Gradient'], ['P', 'Shape'], ['K', 'Stamp'], ['T', 'Text'],
     ['H', 'Hand'], ['Z', 'Zoom'], ['X', 'Swap colors'], ['[ ]', 'Brush size'],
@@ -359,6 +359,7 @@ export function buildCommands(app) {
     'select.all': { label: 'Select All', key: 'Ctrl+A', run: needDoc(() => D().selectAll()) },
     'select.none': { label: 'Deselect', key: 'Ctrl+D', run: needDoc(() => D().deselect()) },
     'select.invert': { label: 'Invert Selection', key: 'Ctrl+Shift+I', run: needDoc(() => D().invertSelection()) },
+    'select.bycolor': { label: 'Select By Color', key: 'Q', run: needDoc(() => app.setTool('colorsel')) },
 
     'filter.repeat': { label: 'Repeat Last Filter', key: 'Ctrl+F', run: needDoc(() => app.repeatLastFilter()) },
 
@@ -389,7 +390,7 @@ const MENU_LAYOUT = [
     { sub: 'ADJUSTMENTS', items: () => FILTERS.filter(f => f.group === 'adjust').map(f => 'fx.' + f.id) },
     null, 'image.rot90', 'image.rot270', 'image.rot180', 'image.fliph', 'image.flipv']],
   ['LAYER', ['layer.new', 'layer.dupe', 'layer.delete', null, 'layer.merge', 'layer.flatten', 'layer.rasterize', null, 'layer.up', 'layer.down']],
-  ['SELECT', ['select.all', 'select.none', 'select.invert']],
+  ['SELECT', ['select.all', 'select.none', 'select.invert', null, 'select.bycolor']],
   ['FILTER', ['filter.repeat', null, { sub: 'ALL FILTERS', items: () => FILTERS.filter(f => f.group === 'filter').map(f => 'fx.' + f.id) }]],
   ['VIEW', ['view.zoomin', 'view.zoomout', 'view.fit', 'view.hundred', null, 'view.fullscreen']],
   ['HELP', ['help.shortcuts', 'help.about', null, 'file.windows', 'help.home']],

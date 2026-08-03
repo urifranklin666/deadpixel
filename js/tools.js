@@ -12,6 +12,7 @@ const I = {
   marquee: '<rect x="4" y="5" width="16" height="14" stroke-dasharray="3 2.4"/>',
   lasso: '<path d="M4 11c0-3.9 3.6-6 8-6s8 2.1 8 6-3.6 6-8 6c-1 0-2-.1-2.9-.4M6 19.5c-1.2-.6-1.6-2.3-.8-3.6"/><circle cx="7" cy="19" r="1.6"/>',
   wand: '<path d="M15 9L4 20M17 3v3M21 7h-3M20 3l-2 2M14 6l1.5 1.5M19 11l-1.5-1.5"/>',
+  colorsel: '<circle cx="12" cy="12" r="8.5" stroke-dasharray="3.2 2.6"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>',
   crop: '<path d="M7 2v15h15M2 7h15v15"/>',
   picker: '<path d="M14 6l4 4M6 18l-3 1 1-3L15 5l3 3L7 19zM17 3l4 4"/>',
   brush: '<path d="M20 4c-4 1-9 5-11 9l2 2c4-2 8-7 9-11zM9 13c-2 0-4 2-4 4 0 1-1 2-2 2 1.5 2 6 2 7-1 .5-1.5 0-3-1-5z"/>',
@@ -263,6 +264,118 @@ T({
     D.setSelection(Selection.fromMaskData(w, h, mask), 'Magic wand');
     app.requestRender();
   },
+});
+
+/* ---------------- select by color ---------------- */
+T({
+  id: 'colorsel', name: 'COLOR SEL', key: 'q', icon: 'colorsel',
+  hint: 'click/drag a color to select it everywhere · Shift adds · Alt subtracts',
+  options: [
+    { type: 'slider', key: 'tolerance', label: 'Tolerance', min: 0, max: 255, step: 1, scope: 'tool', def: 40 },
+    { type: 'check', key: 'soft', label: 'SOFT EDGE', scope: 'tool', def: true },
+    { type: 'seg', key: 'mode', label: 'Mode', values: [['new', 'NEW'], ['add', 'ADD'], ['sub', 'SUB']], scope: 'tool', def: 'new' },
+    { type: 'seg', key: 'source', label: 'From', values: [['merged', 'MERGED'], ['layer', 'LAYER']], scope: 'tool', def: 'merged' },
+  ],
+  state: { tolerance: 40, soft: true, mode: 'new', source: 'merged' },
+  maskData: null,
+  preview: null,
+  _lastCompute: 0,
+  _srcData: null,
+
+  sourceImage(app) {
+    const D = app.doc;
+    const canvas = this.state.source === 'layer' && D.activeLayer ? D.activeLayer.canvas : D.compose();
+    return canvas.getContext('2d').getImageData(0, 0, D.width, D.height);
+  },
+  compute(app, p, force = false) {
+    const now = performance.now();
+    if (!force && now - this._lastCompute < 60) return; // throttle live preview
+    this._lastCompute = now;
+    const D = app.doc;
+    const x0 = Math.floor(p.x), y0 = Math.floor(p.y);
+    if (x0 < 0 || y0 < 0 || x0 >= D.width || y0 >= D.height) return;
+    if (!this._srcData) this._srcData = this.sourceImage(app);
+    const d = this._srcData.data, w = D.width, h = D.height;
+    const i0 = (y0 * w + x0) * 4;
+    const tr = d[i0], tg = d[i0 + 1], tb = d[i0 + 2], ta = d[i0 + 3];
+    const tol = this.state.tolerance;
+    const softRange = this.state.soft ? Math.max(10, tol * .45) : 0;
+    const mask = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const j = i * 4;
+      const dr = d[j] - tr, dg = d[j + 1] - tg, db = d[j + 2] - tb, da = d[j + 3] - ta;
+      const dist = Math.sqrt((dr * dr + dg * dg + db * db + da * da) / 4);
+      if (dist <= tol) mask[i] = 255;
+      else if (softRange && dist <= tol + softRange) mask[i] = Math.round(255 * (1 - (dist - tol) / softRange));
+    }
+    this.maskData = mask;
+    // tinted preview canvas (doc space)
+    const pv = makeCanvas(w, h);
+    const pctx = pv.getContext('2d');
+    const img = pctx.createImageData(w, h);
+    for (let i = 0; i < mask.length; i++) {
+      const j = i * 4;
+      img.data[j] = 255; img.data[j + 1] = 34; img.data[j + 2] = 51;
+      img.data[j + 3] = mask[i] * .45;
+    }
+    pctx.putImageData(img, 0, 0);
+    this.preview = pv;
+    app.requestRender();
+  },
+  onDown(app, p, e) {
+    this._srcData = null; // fresh sample of the document
+    this.dragging = true;
+    // modifier shortcuts mirror the mode seg: Shift=add, Alt=sub
+    this._mode = e.shiftKey ? 'add' : e.altKey ? 'sub' : this.state.mode;
+    this.compute(app, p, true);
+  },
+  onMove(app, p) {
+    if (this.dragging) this.compute(app, p);
+  },
+  onUp(app) {
+    if (!this.dragging) return;
+    this.dragging = false;
+    const mask = this.maskData;
+    this.maskData = null; this.preview = null; this._srcData = null;
+    if (!mask) { app.requestRender(); return; }
+    const D = app.doc;
+    let sel = Selection.fromMaskData(D.width, D.height, mask);
+    const mode = this._mode, prev = D.selection;
+    if (mode !== 'new' && prev) {
+      const merged = new Selection(D.width, D.height);
+      merged.mctx.drawImage(prev.mask, 0, 0);
+      if (mode === 'add') merged.mctx.drawImage(sel.mask, 0, 0);
+      else {
+        merged.mctx.globalCompositeOperation = 'destination-out';
+        merged.mctx.drawImage(sel.mask, 0, 0);
+        merged.mctx.globalCompositeOperation = 'source-over';
+      }
+      sel = merged._done();
+    } else if (mode === 'sub' && !prev) {
+      app.toast('NOTHING TO SUBTRACT FROM', true);
+      app.requestRender();
+      return;
+    }
+    if (sel.isEmpty) {
+      D.deselect();
+      app.toast('SELECTION EMPTY', true);
+    } else {
+      D.setSelection(sel, 'Select by color');
+      const b = sel.bounds;
+      app.toast(`SELECTED ${b.w}×${b.h} REGION`);
+    }
+    app.requestRender();
+  },
+  drawOverlay(app, ctx) {
+    if (!this.preview) return;
+    ctx.save();
+    ctx.translate(app.view.panX, app.view.panY);
+    ctx.scale(app.view.zoom, app.view.zoom);
+    ctx.imageSmoothingEnabled = app.view.zoom < 1;
+    ctx.drawImage(this.preview, 0, 0);
+    ctx.restore();
+  },
+  onDeactivate() { this.maskData = null; this.preview = null; this._srcData = null; this.dragging = false; },
 });
 
 /* ---------------- crop ---------------- */
