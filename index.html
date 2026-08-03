@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>DEADPIXEL — raster surgery suite</title>
+<meta name="description" content="DEADPIXEL — a full-blooded image editor in your browser. Layers, brushes, filters, actions, text. A deadplug.digital transmission.">
+<meta name="theme-color" content="#050505">
+<link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="fonts/pack/fonts.css">
+<link rel="stylesheet" href="css/ui.css">
+</head>
+<body>
+
+<!-- boot splash -->
+<div id="boot" aria-hidden="true">
+  <div id="boot-osd">
+    <div class="boot-line" data-t="0">DEADPIXEL BIOS v1.0 — CH.404 SUBCARRIER</div>
+    <div class="boot-line" data-t="260">RASTER SURGERY SUITE ............ OK</div>
+    <div class="boot-line" data-t="480">LAYER COMPOSITOR ................ OK</div>
+    <div class="boot-line" data-t="640">BRUSH ENGINE / 15 TIPS .......... OK</div>
+    <div class="boot-line" data-t="800">FONT MORGUE ..................... OK</div>
+    <div class="boot-line" data-t="960">SIGNAL LOCKED. BEGIN SURGERY.</div>
+  </div>
+  <div id="boot-skip">CLICK TO SKIP</div>
+</div>
+
+<div id="app" hidden>
+  <!-- menu bar -->
+  <header id="menubar">
+    <div id="logo" title="deadplug.digital">
+      <span class="logo-px"></span><span class="logo-word">DEAD<em>PIXEL</em></span>
+    </div>
+    <nav id="menus" role="menubar"></nav>
+    <div id="doc-title" title="document">UNTITLED.DPX</div>
+    <div id="menubar-right">
+      <span id="rec-light" hidden>● REC</span>
+      <a id="home-link" href="https://deadplug.digital" target="_blank" rel="noopener" title="return to the broadcast">CH.404</a>
+    </div>
+  </header>
+
+  <!-- contextual tool options -->
+  <div id="optionsbar"></div>
+
+  <main id="workspace">
+    <div id="toolbar" role="toolbar" aria-label="tools"></div>
+
+    <div id="viewport">
+      <canvas id="view"></canvas>
+      <div id="edit-overlay"></div>
+      <div id="drop-hint"><span>DROP IMAGE TO IMPORT</span></div>
+    </div>
+
+    <aside id="panels"></aside>
+  </main>
+
+  <footer id="statusbar">
+    <span id="st-hint"></span>
+    <span class="st-spacer"></span>
+    <span id="st-pos">—</span>
+    <span id="st-size">—</span>
+    <span id="st-zoom">100%</span>
+    <span id="st-sig" title="signal">SIG ▮▮▮▮▯</span>
+  </footer>
+</div>
+
+<!-- modal dialogs mount here -->
+<div id="dialogs"></div>
+
+<script src="js/vendor/fflate.js"></script>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
