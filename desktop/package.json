@@ -1,0 +1,55 @@
+{
+  "name": "deadpixel",
+  "productName": "DeadPixel",
+  "version": "1.0.0",
+  "description": "DEADPIXEL — raster surgery suite. A deadplug.digital transmission.",
+  "author": "deadplug.digital",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "38.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "digital.deadplug.deadpixel",
+    "productName": "DeadPixel",
+    "compression": "maximum",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js"
+    ],
+    "extraResources": [
+      {
+        "from": "../site",
+        "to": "site",
+        "filter": [
+          "**/*",
+          "!downloads/**"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "DeadPixel-Setup-${version}.exe",
+      "shortcutName": "DeadPixel",
+      "uninstallDisplayName": "DeadPixel"
+    }
+  }
+}
