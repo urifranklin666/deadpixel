@@ -18,6 +18,7 @@ export async function serializeDoc(doc) {
     app: 'DEADPIXEL', version: FORMAT_VERSION,
     name: doc.name, width: doc.width, height: doc.height,
     activeIndex: doc.activeIndex,
+    effects: doc.effects || [],
     layers: [],
   };
   const files = {};
@@ -72,6 +73,7 @@ export async function docFromFiles(files) {
   }
   if (!doc.layers.length) doc.layers.push(new Layer(meta.width, meta.height, 'Background'));
   doc.activeIndex = Math.min(meta.activeIndex || 0, doc.layers.length - 1);
+  doc.effects = Array.isArray(meta.effects) ? meta.effects : [];
   doc.dirty = false;
   return doc;
 }

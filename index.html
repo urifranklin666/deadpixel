@@ -37,6 +37,7 @@
     <div id="doc-title" title="document">UNTITLED.DPX</div>
     <div id="menubar-right">
       <span id="rec-light" hidden>● REC</span>
+      <button id="panels-toggle" type="button" aria-label="Toggle panels" aria-expanded="false">PANELS</button>
       <a id="home-link" href="https://deadplug.digital" target="_blank" rel="noopener" title="return to the broadcast">CH.404</a>
     </div>
   </header>
@@ -51,10 +52,34 @@
       <canvas id="view"></canvas>
       <div id="edit-overlay"></div>
       <div id="drop-hint"><span>DROP IMAGE TO IMPORT</span></div>
+      <section id="launch-bay" aria-label="Start a new DEADPIXEL transmission">
+        <div class="launch-kicker">CH.404 / RASTER INTAKE</div>
+        <h1>MAKE IT<br><em>SUFFER.</em></h1>
+        <p class="launch-deck">Open an image, start clean, or dissect one of our contaminated samples.</p>
+        <div class="launch-primary">
+          <button type="button" data-launch="open"><b>OPEN IMAGE</b><span>PNG · JPEG · WEBP · DPX</span></button>
+          <button type="button" data-launch="new"><b>NEW CANVAS</b><span>BLANK SIGNAL</span></button>
+        </div>
+        <div class="launch-samples">
+          <button type="button" data-sample="broadcast"><i></i><b>MIDNIGHT<br>BROADCAST</b><span>sample 01</span></button>
+          <button type="button" data-sample="xerox"><i></i><b>XEROX<br>GOSPEL</b><span>sample 02</span></button>
+          <button type="button" data-sample="signal"><i></i><b>SIGNAL<br>LOST</b><span>sample 03</span></button>
+        </div>
+        <div class="launch-foot">DROP OR PASTE AN IMAGE ANYWHERE · NOTHING LEAVES YOUR MACHINE</div>
+      </section>
     </div>
 
     <aside id="panels"></aside>
   </main>
+
+  <nav id="damage-dock" aria-label="Damage Mode controls">
+    <button type="button" data-damage="open"><b>＋</b><span>OPEN</span></button>
+    <button type="button" data-damage="crop"><b>⌗</b><span>CROP</span></button>
+    <button type="button" data-damage="text"><b>T</b><span>TEXT</span></button>
+    <button type="button" data-damage="signal"><b>≋</b><span>SIGNAL</span></button>
+    <button type="button" data-damage="compare"><b>◐</b><span>BEFORE</span></button>
+    <button type="button" data-damage="export"><b>⇩</b><span>EXPORT</span></button>
+  </nav>
 
   <footer id="statusbar">
     <span id="st-hint"></span>

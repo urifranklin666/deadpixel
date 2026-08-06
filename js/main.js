@@ -4,6 +4,7 @@ import { Doc, Layer, TextLayer, clamp, makeCanvas } from './engine.js';
 import { TOOLS, toolById, transformTool } from './tools.js';
 import * as UI from './ui.js';
 import { openDpx, loadImageFile, docFromImage, autosave, loadAutosave, clearAutosave, docFromFiles } from './io.js';
+import { processSignalStack } from './filters.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -44,6 +45,7 @@ class App {
   /* ------------------------------ doc ------------------------------ */
   attachDoc(doc) {
     this.doc = doc;
+    doc.effectProcessor = processSignalStack;
     doc.addEventListener('change', (e) => {
       this.requestRender();
       this.refreshTitle();
@@ -57,12 +59,40 @@ class App {
     this.refreshTitle();
     this.refreshLayers?.();
     this.refreshHistory?.();
+    this.refreshActions?.();
     this.fitView();
+    document.querySelector('#launch-bay')?.classList.add('gone');
+    document.body.classList.add('has-doc');
   }
   newDoc(w, h, opts) {
     const doc = new Doc(w, h, opts);
     this.attachDoc(doc);
     this.toast('NEW TRANSMISSION ' + w + '×' + h);
+  }
+  openSample(kind) {
+    const W = 1280, H = 800;
+    this.newDoc(W, H, { name: kind.toUpperCase(), bg: '#050505' });
+    const l = this.doc.activeLayer, c = l.ctx;
+    c.fillStyle = '#050505'; c.fillRect(0, 0, W, H);
+    c.strokeStyle = 'rgba(255,34,51,.18)'; c.lineWidth = 1;
+    for (let x = 0; x < W; x += 48) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, H); c.stroke(); }
+    for (let y = 0; y < H; y += 48) { c.beginPath(); c.moveTo(0, y); c.lineTo(W, y); c.stroke(); }
+    c.font = '900 190px "Big Shoulders"'; c.textBaseline = 'top';
+    if (kind === 'xerox') {
+      c.fillStyle = '#d8d2d3'; c.fillRect(70, 70, W - 140, H - 140);
+      c.fillStyle = '#050505'; c.fillText('COPY', 105, 92); c.fillText('OF A', 105, 260); c.fillText('GHOST', 105, 428);
+      c.fillStyle = '#ff2233'; c.fillRect(850, 70, 18, H - 140);
+    } else if (kind === 'signal') {
+      c.fillStyle = '#ff2233'; c.fillRect(0, 510, W, 130);
+      c.fillStyle = '#d8d2d3'; c.fillText('NO', 85, 100); c.fillText('SIGNAL', 85, 270);
+      c.fillStyle = '#050505'; c.font = '32px VT323'; c.fillText('TRANSMISSION CORRUPTED / CH.404', 90, 550);
+    } else {
+      c.fillStyle = '#d8d2d3'; c.fillText('AFTER', 75, 100); c.fillStyle = '#ff2233'; c.fillText('MIDNIGHT', 75, 280);
+      c.strokeStyle = '#ff2233'; c.lineWidth = 8; c.strokeRect(75, 500, 880, 130);
+      c.font = '28px VT323'; c.fillStyle = '#d8d2d3'; c.fillText('UNLICENSED TRANSMISSION / KEEP WATCHING', 105, 545);
+    }
+    l.name = 'CONTAMINATED SAMPLE';
+    this.doc.changed(); this.doc.dirty = false; this.refreshTitle(); this.requestRender();
   }
   refreshTitle() {
     const t = $('#doc-title');
@@ -223,6 +253,7 @@ class App {
     this.tool?.onDeactivate?.(this);
     if (this.tool) this.prevToolId = this.tool.id;
     this.tool = t;
+    document.body.dataset.tool = id;
     t.onActivate?.(this);
     UI.reflectTool(this);
     UI.buildOptionsBar(this);
@@ -471,15 +502,35 @@ class App {
   bindInput() {
     const vc = this.viewCanvas;
     let panDrag = null;
+    const touchPoints = new Map();
+    let pinch = null, gestureActive = false;
+    const pinchMetrics = () => {
+      const pts = [...touchPoints.values()];
+      if (pts.length < 2) return null;
+      const a = pts[0], b = pts[1];
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
+    };
 
     vc.addEventListener('pointerdown', (e) => {
       if (this._textEditor) { this.commitTextEntry(); if (this.tool?.id === 'text') return; }
-      vc.setPointerCapture(e.pointerId);
+      try { vc.setPointerCapture(e.pointerId); } catch (_) { /* synthetic/test pointers */ }
       const r = vc.getBoundingClientRect();
       const sx = e.clientX - r.left, sy = e.clientY - r.top;
       const [x, y] = this.screenToDoc(sx, sy);
       const pt = { x, y, sx, sy, pressure: e.pressure || .5 };
       this.pointer = pt;
+      if (e.pointerType === 'touch') {
+        touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (touchPoints.size === 2) {
+          const m = pinchMetrics();
+          gestureActive = true;
+          pinch = { ...m, zoom: this.view.zoom, panX: this.view.panX, panY: this.view.panY };
+          this.tool?.onUp?.(this, pt, e);
+          this.viewport.classList.add('panning');
+          return;
+        }
+        if (gestureActive) return;
+      }
       if (this.spaceDown || e.button === 1) {
         panDrag = { x: e.clientX, y: e.clientY, px: this.view.panX, py: this.view.panY };
         this.viewport.classList.add('panning');
@@ -497,6 +548,22 @@ class App {
       const pt = { x, y, sx, sy, pressure: e.pressure || .5 };
       this.pointer = pt;
       this.pointerInView = true;
+      if (e.pointerType === 'touch' && touchPoints.has(e.pointerId)) {
+        touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (gestureActive && pinch) {
+          const m = pinchMetrics();
+          if (m) {
+            const z = clamp(pinch.zoom * (m.d / pinch.d), .02, 32);
+            const startDocX = (pinch.x - r.left - pinch.panX) / pinch.zoom;
+            const startDocY = (pinch.y - r.top - pinch.panY) / pinch.zoom;
+            this.view.zoom = z;
+            this.view.panX = (m.x - r.left) - startDocX * z;
+            this.view.panY = (m.y - r.top) - startDocY * z;
+            this.requestRender();
+          }
+          return;
+        }
+      }
       if (panDrag) {
         this.view.panX = panDrag.px + (e.clientX - panDrag.x);
         this.view.panY = panDrag.py + (e.clientY - panDrag.y);
@@ -516,6 +583,13 @@ class App {
       if (['brush', 'pencil', 'eraser', 'clone', 'smudge'].includes(this.tool?.id)) this.requestRender();
     });
     vc.addEventListener('pointerup', (e) => {
+      if (e.pointerType === 'touch') {
+        const wasGesture = gestureActive;
+        touchPoints.delete(e.pointerId);
+        if (touchPoints.size < 2) pinch = null;
+        if (!touchPoints.size) { gestureActive = false; this.viewport.classList.remove('panning'); }
+        if (wasGesture) return;
+      }
       if (panDrag) { panDrag = null; this.viewport.classList.remove('panning'); return; }
       if (!this.doc) return;
       const r = vc.getBoundingClientRect();
@@ -523,6 +597,10 @@ class App {
       const [x, y] = this.screenToDoc(sx, sy);
       this.tool?.onUp?.(this, { x, y, sx, sy, pressure: e.pressure || .5 }, e);
       this.requestRender();
+    });
+    vc.addEventListener('pointercancel', (e) => {
+      touchPoints.delete(e.pointerId);
+      if (!touchPoints.size) { pinch = null; gestureActive = false; this.viewport.classList.remove('panning'); }
     });
     vc.addEventListener('pointerleave', () => { this.pointerInView = false; this.requestRender(); });
     vc.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -654,6 +732,40 @@ async function boot() {
   UI.buildMenus(app);
   UI.buildToolbar(app);
   UI.buildPanels(app);
+  UI.bindLaunchBay(app);
+  const panelToggle = document.querySelector('#panels-toggle');
+  panelToggle?.addEventListener('click', () => {
+    const open = document.querySelector('#panels')?.classList.toggle('open');
+    panelToggle.setAttribute('aria-expanded', String(!!open));
+  });
+  const damageQuery = matchMedia('(max-width: 720px), (pointer: coarse)');
+  const setDamageMode = () => document.body.classList.toggle('damage-mode', damageQuery.matches);
+  damageQuery.addEventListener?.('change', setDamageMode); setDamageMode();
+  const panels = document.querySelector('#panels');
+  const setPanelsOpen = (open) => {
+    panels?.classList.toggle('open', open);
+    panelToggle?.setAttribute('aria-expanded', String(open));
+  };
+  document.querySelectorAll('#damage-dock [data-damage]').forEach(button => {
+    const action = button.dataset.damage;
+    if (action === 'compare') {
+      const bypass = (on) => {
+        if (!app.doc) return;
+        app.doc._effectsBypassed = on; app.doc._compoDirty = true; app.requestRender();
+        button.classList.toggle('holding', on); button.querySelector('span').textContent = on ? 'ORIGINAL' : 'BEFORE';
+      };
+      button.addEventListener('pointerdown', e => { e.preventDefault(); try { button.setPointerCapture(e.pointerId); } catch (_) {} bypass(true); });
+      ['pointerup','pointercancel','lostpointercapture'].forEach(ev => button.addEventListener(ev, () => bypass(false)));
+      return;
+    }
+    button.addEventListener('click', () => {
+      if (action === 'open') app.openFilePicker(false);
+      if (action === 'crop') { app.setTool('crop'); setPanelsOpen(false); app.toast('DRAG A CROP · ENTER TO COMMIT'); }
+      if (action === 'text') { app.setTool('text'); setPanelsOpen(false); app.toast('TAP THE IMAGE TO TYPE'); }
+      if (action === 'signal') { app.activatePanelMode?.('signal'); setPanelsOpen(!panels?.classList.contains('open')); }
+      if (action === 'export') app.cmd['file.export.png'].run();
+    });
+  });
   app.bindInput();
   app.setTool('brush');
 
@@ -702,7 +814,7 @@ async function boot() {
       }
       await clearAutosave();
     }
-    if (!app.doc) UI.newDocDialog(app);
+    if (!app.doc) document.querySelector('#launch-bay')?.classList.remove('gone');
   }
   function el2(tag, cls, html) {
     const e = document.createElement(tag);

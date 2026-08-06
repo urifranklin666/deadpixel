@@ -297,6 +297,8 @@ export class Doc extends EventTarget {
     this.layers = [];
     this.activeIndex = 0;
     this.selection = null;
+    this.effects = [];
+    this.effectProcessor = null;
     this.history = new History();
     this.dirty = false;         // unsaved changes
     this._compo = makeCanvas(w, h);
@@ -330,6 +332,7 @@ export class Doc extends EventTarget {
       }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
+      if (!this._effectsBypassed && this.effects.length && this.effectProcessor) this.effectProcessor(this._compo, this.effects);
       this._compoDirty = false;
     }
     return this._compo;
@@ -342,6 +345,14 @@ export class Doc extends EventTarget {
     if (background) { ctx.fillStyle = background; ctx.fillRect(0, 0, this.width, this.height); }
     ctx.drawImage(this.compose(), 0, 0);
     return c;
+  }
+
+  replaceEffects(next, label = 'Signal rack') {
+    const clone = (v) => JSON.parse(JSON.stringify(v));
+    const before = clone(this.effects), after = clone(next);
+    const apply = (value) => { this.effects = clone(value); this.changed(); };
+    this.history.push(label, () => apply(before), () => apply(after));
+    apply(after);
   }
 
   /* ---- structural ops (history-recorded) ---- */
