@@ -456,6 +456,15 @@ export function defaultParams(filterId) {
   return p;
 }
 
+export function processSignalStack(canvas, effects) {
+  const layer = { canvas, ctx: canvas.getContext('2d', { willReadFrequently: true }) };
+  const doc = { selection: null };
+  for (const effect of effects || []) {
+    if (effect.enabled === false) continue;
+    applyFilterToLayer(doc, layer, effect.filter, { ...defaultParams(effect.filter), ...(effect.params || {}) });
+  }
+}
+
 /* ---- actions ------------------------------------------------------------
    An action = named sequence of {filter, params} steps. */
 

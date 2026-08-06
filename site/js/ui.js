@@ -3,7 +3,7 @@
 import { BLEND_MODES, Selection, hexToRgb, rgbToHex, hsvToRgb, rgbToHsv, clamp, makeCanvas } from './engine.js';
 import { TOOLS, toolById, iconSvg } from './tools.js';
 import { BRUSH_PRESETS, renderTip, STAMPS, renderStamp } from './brushes.js';
-import { FILTERS, filterById, defaultParams, applyFilterToLayer, BUILTIN_ACTIONS, runAction } from './filters.js';
+import { FILTERS, filterById, defaultParams, applyFilterToLayer, BUILTIN_ACTIONS } from './filters.js';
 import { saveDpx, openDpx, exportDoc, downloadBlob, loadImageFile, docFromImage } from './io.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -466,6 +466,14 @@ export function buildToolbar(app) {
   bar.appendChild(fgbg);
   app._fgSw = fg; app._bgSw = bg;
 }
+
+export function bindLaunchBay(app) {
+  const bay = $('#launch-bay');
+  if (!bay) return;
+  bay.querySelector('[data-launch="open"]').addEventListener('click', () => app.openFilePicker(false));
+  bay.querySelector('[data-launch="new"]').addEventListener('click', () => newDocDialog(app));
+  bay.querySelectorAll('[data-sample]').forEach(b => b.addEventListener('click', () => app.openSample(b.dataset.sample)));
+}
 export function reflectTool(app) {
   document.querySelectorAll('.tool-btn').forEach(b =>
     b.classList.toggle('on', b.dataset.tool === app.tool?.id));
@@ -889,38 +897,97 @@ function buildHistoryPanel(app, host) {
 
 /* ---- actions panel ---- */
 function buildActionsPanel(app, host) {
-  const [p, body] = panelShell('actions', 'RITUALS');
+  const [p, body] = panelShell('actions', 'SIGNAL RACK');
+  const activeHead = el('div', 'rack-head');
+  activeHead.append(el('span', null, 'LIVE CHAIN'), el('span', 'rack-count', '0 MODULES'));
+  const activeList = el('div', 'rack-active');
+  const empty = el('div', 'rack-empty', 'CLEAN SIGNAL. ADD A RECIPE BELOW.');
+  activeList.appendChild(empty);
+  const presetHead = el('div', 'rack-head rack-presets');
+  presetHead.append(el('span', null, 'RECIPE ARCHIVE'), el('span', null, 'NON-DESTRUCTIVE'));
   const list = el('div');
   const btns = el('div', 'panel-btns');
   const recBtn = el('button', 'pbtn', '● REC');
   const note = el('div', 'dlg-note');
   note.style.marginTop = '8px';
-  note.textContent = 'One-click filter chains. ● REC records the filters you apply into a new ritual.';
+  note.textContent = 'Modules process the composite without touching layer pixels. They are saved inside the DPX project and included in exports.';
   btns.appendChild(recBtn);
-  body.append(list, btns, note);
+  body.append(activeHead, activeList, presetHead, list, btns, note);
   host.appendChild(p);
 
   const userActions = () => JSON.parse(localStorage.getItem('deadpixel.actions') || '[]');
   const saveUserActions = (a) => localStorage.setItem('deadpixel.actions', JSON.stringify(a));
+  const clone = (v) => JSON.parse(JSON.stringify(v));
+  const changeStack = (label, mutate) => {
+    const D = app.doc;
+    if (!D) return;
+    const next = clone(D.effects || []); mutate(next);
+    D.replaceEffects(next, label); app.requestRender(); refreshActive();
+  };
+
+  const refreshActive = () => {
+    const D = app.doc;
+    activeList.innerHTML = '';
+    const effects = D?.effects || [];
+    activeHead.querySelector('.rack-count').textContent = effects.length + (effects.length === 1 ? ' MODULE' : ' MODULES');
+    if (!effects.length) { activeList.appendChild(el('div', 'rack-empty', 'CLEAN SIGNAL. ADD A RECIPE BELOW.')); return; }
+    effects.forEach((effect, index) => {
+      const f = filterById(effect.filter);
+      if (!f) return;
+      const module = el('article', 'rack-module' + (effect.enabled === false ? ' bypassed' : ''));
+      const top = el('div', 'rack-module-top');
+      const power = el('button', 'rack-power', effect.enabled === false ? '○' : '●'); power.title = 'bypass module';
+      const title = el('button', 'rack-module-name', `${String(index + 1).padStart(2, '0')}  ${f.name}`);
+      const up = el('button', 'rack-move', '↑'), down = el('button', 'rack-move', '↓'), del = el('button', 'rack-delete', '×');
+      power.addEventListener('click', () => changeStack('Bypass ' + f.name, s => { s[index].enabled = s[index].enabled === false; }));
+      up.addEventListener('click', () => changeStack('Move signal module', s => { if (index) [s[index - 1], s[index]] = [s[index], s[index - 1]]; }));
+      down.addEventListener('click', () => changeStack('Move signal module', s => { if (index < s.length - 1) [s[index + 1], s[index]] = [s[index], s[index + 1]]; }));
+      del.addEventListener('click', () => changeStack('Remove ' + f.name, s => s.splice(index, 1)));
+      top.append(power, title, up, down, del); module.appendChild(top);
+      const controls = el('div', 'rack-controls');
+      for (const param of f.params) {
+        const rowEl = el('label', 'rack-param');
+        const lab = el('span', null, param.label); const val = el('output', null, String(effect.params?.[param.key] ?? param.def));
+        const input = el('input'); input.type = 'range'; input.min = param.min; input.max = param.max; input.step = param.step; input.value = effect.params?.[param.key] ?? param.def;
+        let before = null;
+        input.addEventListener('focus', () => { before ||= clone(D.effects); });
+        input.addEventListener('pointerdown', () => { before = clone(D.effects); });
+        input.addEventListener('input', () => {
+          D.effects[index].params ||= {}; D.effects[index].params[param.key] = parseFloat(input.value);
+          val.textContent = input.value; D.changed(); app.requestRender();
+        });
+        input.addEventListener('change', () => {
+          const after = clone(D.effects); const start = before || clone(D.effects); before = null;
+          D.effects = start; D.replaceEffects(after, f.name + ': ' + param.label); refreshActive();
+        });
+        rowEl.append(lab, val, input); controls.appendChild(rowEl);
+      }
+      if (!f.params.length) controls.appendChild(el('div', 'rack-fixed', 'FIXED-PARAMETER MODULE'));
+      module.appendChild(controls);
+      title.addEventListener('click', () => module.classList.toggle('open'));
+      activeList.appendChild(module);
+    });
+  };
 
   const refresh = () => {
     list.innerHTML = '';
     const render = (action, deletable) => {
-      const r = el('div', 'action-row');
-      const runB = el('button', 'a-run', '▶');
-      runB.title = 'run on active layer';
+      const r = el('div', 'action-row signal-card');
+      const preview = el('canvas', 'signal-preview'); preview.width = 220; preview.height = 96;
+      const runB = el('button', 'a-run', 'ADD');
+      runB.title = 'add recipe to non-destructive signal rack';
       runB.addEventListener('click', () => {
         const D = app.doc;
-        const l = D?.activeLayer;
-        if (!l) return;
-        if (l.type === 'text') { toast('RASTERIZE TEXT LAYER FIRST', true); return; }
-        if (l.locked) { toast('LAYER IS LOCKED', true); return; }
-        runAction(D, l, action);
-        app.requestRender();
-        toast('RITUAL COMPLETE: ' + action.name);
+        if (!D) return;
+        changeStack('Add recipe: ' + action.name, stack => stack.push(...action.steps.map((step, i) => ({
+          id: 'fx_' + Date.now().toString(36) + '_' + i,
+          filter: step.filter, params: { ...defaultParams(step.filter), ...(step.params || {}) }, enabled: true,
+        }))));
+        toast('RECIPE PATCHED IN: ' + action.name);
       });
-      r.appendChild(runB);
-      r.appendChild(el('span', 'a-name', action.name));
+      const meta = el('div', 'signal-meta');
+      meta.append(el('span', 'a-name', action.name), el('span', 'signal-chain', action.steps.map(s => s.filter.replaceAll('-', ' ')).join(' ▸ ')));
+      r.append(preview, meta, runB);
       if (deletable) {
         const d = el('button', 'a-del', '✕');
         d.addEventListener('click', () => {
@@ -930,11 +997,29 @@ function buildActionsPanel(app, host) {
         r.appendChild(d);
       }
       list.appendChild(r);
+      const drawPreview = () => {
+        const ctx = preview.getContext('2d'); ctx.clearRect(0, 0, preview.width, preview.height);
+        ctx.fillStyle = '#050505'; ctx.fillRect(0, 0, preview.width, preview.height);
+        if (!app.doc) { ctx.fillStyle = '#ff2233'; ctx.font = '52px Big Shoulders'; ctx.fillText('NO SIGNAL', 14, 63); return; }
+        const src = app.doc.flattenedCanvas();
+        const scale = Math.max(preview.width / src.width, preview.height / src.height);
+        const w = src.width * scale, h = src.height * scale;
+        ctx.drawImage(src, (preview.width - w) / 2, (preview.height - h) / 2, w, h);
+        const layer = { canvas: preview, ctx };
+        for (const step of action.steps) applyFilterToLayer({ selection: null }, layer, step.filter, { ...defaultParams(step.filter), ...step.params });
+      };
+      drawPreview();
+      r._drawPreview = drawPreview;
     };
     BUILTIN_ACTIONS.forEach(a => render(a, false));
     userActions().forEach(a => render(a, true));
   };
   refresh();
+  app.refreshActions = () => {
+    refreshActive();
+    list.querySelectorAll('.signal-card').forEach(card => card._drawPreview?.());
+  };
+  refreshActive();
 
   recBtn.addEventListener('click', async () => {
     if (!app.recording) {
@@ -973,9 +1058,23 @@ function buildActionsPanel(app, host) {
 export function buildPanels(app) {
   const host = $('#panels');
   host.innerHTML = '';
-  buildColorPanel(app, host);
-  buildBrushPanel(app, host);
-  buildLayersPanel(app, host);
-  buildHistoryPanel(app, host);
-  buildActionsPanel(app, host);
+  const tabs = el('div', 'panel-tabs');
+  const editTab = el('button', 'on', 'LAYERS');
+  const signalTab = el('button', null, 'SIGNAL RACK');
+  tabs.append(editTab, signalTab); host.appendChild(tabs);
+  const editHost = el('div', 'panel-mode on'); editHost.dataset.mode = 'edit';
+  const signalHost = el('div', 'panel-mode'); signalHost.dataset.mode = 'signal';
+  host.append(editHost, signalHost);
+  const activate = (mode) => {
+    editTab.classList.toggle('on', mode === 'edit'); signalTab.classList.toggle('on', mode === 'signal');
+    editHost.classList.toggle('on', mode === 'edit'); signalHost.classList.toggle('on', mode === 'signal');
+    if (mode === 'signal') app.refreshActions?.();
+  };
+  app.activatePanelMode = activate;
+  editTab.addEventListener('click', () => activate('edit')); signalTab.addEventListener('click', () => activate('signal'));
+  buildColorPanel(app, editHost);
+  buildBrushPanel(app, editHost);
+  buildLayersPanel(app, editHost);
+  buildHistoryPanel(app, editHost);
+  buildActionsPanel(app, signalHost);
 }
