@@ -46,6 +46,14 @@ class App {
   attachDoc(doc) {
     this.doc = doc;
     doc.effectProcessor = processSignalStack;
+    if (this.pendingRecipe) {
+      doc.effects = this.pendingRecipe.effects;
+      doc.signalSeed = this.pendingRecipe.seed;
+      doc.changed();
+      this.pendingRecipe = null;
+      history.replaceState(null, '', location.pathname + location.search);
+      this.toast('SHARED RECIPE PATCHED IN · IMAGE STAYED LOCAL');
+    }
     doc.addEventListener('change', (e) => {
       this.requestRender();
       this.refreshTitle();
@@ -733,6 +741,8 @@ async function boot() {
   UI.buildToolbar(app);
   UI.buildPanels(app);
   UI.bindLaunchBay(app);
+  app.pendingRecipe = UI.recipeFromHash();
+  if (app.pendingRecipe) app.toast('SHARED RECIPE ARMED · OPEN AN IMAGE OR SAMPLE');
   const panelToggle = document.querySelector('#panels-toggle');
   panelToggle?.addEventListener('click', () => {
     const open = document.querySelector('#panels')?.classList.toggle('open');

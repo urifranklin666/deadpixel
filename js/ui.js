@@ -3,7 +3,7 @@
 import { BLEND_MODES, Selection, hexToRgb, rgbToHex, hsvToRgb, rgbToHsv, clamp, makeCanvas } from './engine.js';
 import { TOOLS, toolById, iconSvg } from './tools.js';
 import { BRUSH_PRESETS, renderTip, STAMPS, renderStamp } from './brushes.js';
-import { FILTERS, filterById, defaultParams, applyFilterToLayer, BUILTIN_ACTIONS } from './filters.js';
+import { FILTERS, filterById, defaultParams, applyFilterToLayer, BUILTIN_ACTIONS, seeded } from './filters.js';
 import { saveDpx, openDpx, exportDoc, downloadBlob, loadImageFile, docFromImage } from './io.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -13,6 +13,27 @@ const el = (tag, cls, html) => {
   if (html != null) e.innerHTML = html;
   return e;
 };
+
+export function recipeToHash(doc) {
+  const payload = {
+    v: 1, s: doc.signalSeed >>> 0,
+    e: (doc.effects || []).map(x => [x.filter, x.params || {}, x.enabled !== false, !!x.locked, x.paramLocks || {}]),
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let raw = ''; bytes.forEach(b => raw += String.fromCharCode(b));
+  return '#r=' + btoa(raw).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+}
+export function recipeFromHash(hash = location.hash) {
+  if (!hash.startsWith('#r=')) return null;
+  try {
+    let raw = hash.slice(3).replaceAll('-', '+').replaceAll('_', '/');
+    while (raw.length % 4) raw += '=';
+    const bin = atob(raw), bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+    const p = JSON.parse(new TextDecoder().decode(bytes));
+    if (p.v !== 1 || !Array.isArray(p.e)) return null;
+    return { seed: p.s >>> 0, effects: p.e.map((x, i) => ({ id: `shared_${i}`, filter: x[0], params: x[1] || {}, enabled: x[2] !== false, locked: !!x[3], paramLocks: x[4] || {} })) };
+  } catch (_) { return null; }
+}
 
 /* ============================ toasts ============================ */
 let toastBox = null;
@@ -255,7 +276,7 @@ async function exportDialog(app, format) {
 function aboutDialog() {
   dialog('ABOUT', (body) => {
     body.appendChild(el('div', 'about-hero', 'DEAD<em>PIXEL</em>'));
-    body.appendChild(el('div', 'about-osd', 'RASTER SURGERY SUITE · v1.1'));
+    body.appendChild(el('div', 'about-osd', 'RASTER SURGERY SUITE · v1.4'));
     body.appendChild(el('div', 'dlg-note',
       'A full-blooded image editor running entirely in your browser. Nothing you make here ever leaves your machine — no uploads, no accounts, no telemetry. Just you and the pixels.<br><br>' +
       'A transmission from <a href="https://deadplug.digital" target="_blank" rel="noopener">deadplug.digital</a> · CH.404'));
@@ -903,6 +924,14 @@ function buildActionsPanel(app, host) {
   const activeList = el('div', 'rack-active');
   const empty = el('div', 'rack-empty', 'CLEAN SIGNAL. ADD A RECIPE BELOW.');
   activeList.appendChild(empty);
+  const rackTools = el('div', 'rack-tools');
+  const seedBox = el('div', 'rack-seed');
+  seedBox.append(el('span', null, 'SEED'), el('code', null, '00000000'));
+  const mutateBtn = el('button', null, 'MUTATE');
+  const saveBtn = el('button', null, 'SAVE');
+  const shareBtn = el('button', null, 'COPY LINK');
+  const bypassBtn = el('button', null, 'BYPASS');
+  rackTools.append(seedBox, mutateBtn, saveBtn, shareBtn, bypassBtn);
   const presetHead = el('div', 'rack-head rack-presets');
   presetHead.append(el('span', null, 'RECIPE ARCHIVE'), el('span', null, 'NON-DESTRUCTIVE'));
   const list = el('div');
@@ -912,7 +941,7 @@ function buildActionsPanel(app, host) {
   note.style.marginTop = '8px';
   note.textContent = 'Modules process the composite without touching layer pixels. They are saved inside the DPX project and included in exports.';
   btns.appendChild(recBtn);
-  body.append(activeHead, activeList, presetHead, list, btns, note);
+  body.append(activeHead, rackTools, activeList, presetHead, list, btns, note);
   host.appendChild(p);
 
   const userActions = () => JSON.parse(localStorage.getItem('deadpixel.actions') || '[]');
@@ -925,10 +954,49 @@ function buildActionsPanel(app, host) {
     D.replaceEffects(next, label); app.requestRender(); refreshActive();
   };
 
+  mutateBtn.addEventListener('click', () => {
+    const D = app.doc; if (!D?.effects.length) return;
+    const nextSeed = crypto.getRandomValues(new Uint32Array(1))[0];
+    const rnd = seeded(nextSeed);
+    const next = clone(D.effects);
+    next.forEach(effect => {
+      if (effect.locked) return;
+      const f = filterById(effect.filter);
+      for (const param of f?.params || []) {
+        if (effect.paramLocks?.[param.key]) continue;
+        const steps = Math.round((param.max - param.min) / param.step);
+        effect.params ||= {};
+        effect.params[param.key] = param.min + Math.floor(rnd() * (steps + 1)) * param.step;
+      }
+    });
+    D.replaceEffects(next, 'Mutate signal', nextSeed); app.requestRender(); refreshActive();
+    toast('SIGNAL MUTATED · SEED ' + nextSeed.toString(16).padStart(8, '0').toUpperCase());
+  });
+  bypassBtn.addEventListener('pointerdown', () => { if (app.doc) { app.doc._effectsBypassed = true; app.doc._compoDirty = true; app.requestRender(); bypassBtn.classList.add('on'); } });
+  const restoreBypass = () => { if (app.doc) { app.doc._effectsBypassed = false; app.doc._compoDirty = true; app.requestRender(); bypassBtn.classList.remove('on'); } };
+  ['pointerup','pointercancel','pointerleave'].forEach(ev => bypassBtn.addEventListener(ev, restoreBypass));
+  saveBtn.addEventListener('click', async () => {
+    const D = app.doc; if (!D?.effects.length) return;
+    const name = await dialog('SAVE SIGNAL RECIPE', bodyEl => {
+      const input = el('input'); input.type = 'text'; input.value = 'MY DAMAGE'; bodyEl.appendChild(row('Name', input)); return { input };
+    }, [{ label: 'Cancel' }, { label: 'Save', primary: true, value: c => c.input.value.trim() || 'MY DAMAGE' }]);
+    if (!name) return;
+    const actions = userActions();
+    actions.push({ id: 'rack_' + Date.now(), name: name.toUpperCase(), seed: D.signalSeed >>> 0, steps: clone(D.effects).map(x => ({ filter: x.filter, params: x.params, enabled: x.enabled, locked: x.locked, paramLocks: x.paramLocks })) });
+    saveUserActions(actions); refresh(); toast('RECIPE ARCHIVED: ' + name.toUpperCase());
+  });
+  shareBtn.addEventListener('click', async () => {
+    const D = app.doc; if (!D?.effects.length) return;
+    const url = location.origin + location.pathname + recipeToHash(D);
+    try { await navigator.clipboard.writeText(url); toast('RECIPE LINK COPIED · SETTINGS ONLY'); }
+    catch (_) { prompt('COPY RECIPE LINK', url); }
+  });
+
   const refreshActive = () => {
     const D = app.doc;
     activeList.innerHTML = '';
     const effects = D?.effects || [];
+    seedBox.querySelector('code').textContent = D ? D.signalSeed.toString(16).padStart(8, '0').toUpperCase() : '00000000';
     activeHead.querySelector('.rack-count').textContent = effects.length + (effects.length === 1 ? ' MODULE' : ' MODULES');
     if (!effects.length) { activeList.appendChild(el('div', 'rack-empty', 'CLEAN SIGNAL. ADD A RECIPE BELOW.')); return; }
     effects.forEach((effect, index) => {
@@ -938,16 +1006,19 @@ function buildActionsPanel(app, host) {
       const top = el('div', 'rack-module-top');
       const power = el('button', 'rack-power', effect.enabled === false ? '○' : '●'); power.title = 'bypass module';
       const title = el('button', 'rack-module-name', `${String(index + 1).padStart(2, '0')}  ${f.name}`);
-      const up = el('button', 'rack-move', '↑'), down = el('button', 'rack-move', '↓'), del = el('button', 'rack-delete', '×');
+      const lock = el('button', 'rack-lock', effect.locked ? '◆' : '◇'), up = el('button', 'rack-move', '↑'), down = el('button', 'rack-move', '↓'), del = el('button', 'rack-delete', '×');
       power.addEventListener('click', () => changeStack('Bypass ' + f.name, s => { s[index].enabled = s[index].enabled === false; }));
+      lock.addEventListener('click', () => changeStack('Lock ' + f.name, s => { s[index].locked = !s[index].locked; }));
       up.addEventListener('click', () => changeStack('Move signal module', s => { if (index) [s[index - 1], s[index]] = [s[index], s[index - 1]]; }));
       down.addEventListener('click', () => changeStack('Move signal module', s => { if (index < s.length - 1) [s[index + 1], s[index]] = [s[index], s[index + 1]]; }));
       del.addEventListener('click', () => changeStack('Remove ' + f.name, s => s.splice(index, 1)));
-      top.append(power, title, up, down, del); module.appendChild(top);
+      top.append(power, title, lock, up, down, del); module.appendChild(top);
       const controls = el('div', 'rack-controls');
       for (const param of f.params) {
         const rowEl = el('label', 'rack-param');
         const lab = el('span', null, param.label); const val = el('output', null, String(effect.params?.[param.key] ?? param.def));
+        const paramLock = el('button', 'rack-param-lock', effect.paramLocks?.[param.key] ? '◆' : '◇'); paramLock.type = 'button'; paramLock.title = 'lock parameter during mutation';
+        paramLock.addEventListener('click', e => { e.preventDefault(); changeStack('Lock parameter', s => { s[index].paramLocks ||= {}; s[index].paramLocks[param.key] = !s[index].paramLocks[param.key]; }); });
         const input = el('input'); input.type = 'range'; input.min = param.min; input.max = param.max; input.step = param.step; input.value = effect.params?.[param.key] ?? param.def;
         let before = null;
         input.addEventListener('focus', () => { before ||= clone(D.effects); });
@@ -960,7 +1031,7 @@ function buildActionsPanel(app, host) {
           const after = clone(D.effects); const start = before || clone(D.effects); before = null;
           D.effects = start; D.replaceEffects(after, f.name + ': ' + param.label); refreshActive();
         });
-        rowEl.append(lab, val, input); controls.appendChild(rowEl);
+        rowEl.append(lab, paramLock, val, input); controls.appendChild(rowEl);
       }
       if (!f.params.length) controls.appendChild(el('div', 'rack-fixed', 'FIXED-PARAMETER MODULE'));
       module.appendChild(controls);
@@ -979,10 +1050,14 @@ function buildActionsPanel(app, host) {
       runB.addEventListener('click', () => {
         const D = app.doc;
         if (!D) return;
-        changeStack('Add recipe: ' + action.name, stack => stack.push(...action.steps.map((step, i) => ({
+        const next = clone(D.effects || []);
+        next.push(...action.steps.map((step, i) => ({
           id: 'fx_' + Date.now().toString(36) + '_' + i,
-          filter: step.filter, params: { ...defaultParams(step.filter), ...(step.params || {}) }, enabled: true,
-        }))));
+          filter: step.filter, params: { ...defaultParams(step.filter), ...(step.params || {}) }, enabled: step.enabled !== false,
+          locked: !!step.locked, paramLocks: step.paramLocks || {},
+        })));
+        D.replaceEffects(next, 'Add recipe: ' + action.name, Number.isFinite(action.seed) ? action.seed : D.signalSeed);
+        app.requestRender(); refreshActive();
         toast('RECIPE PATCHED IN: ' + action.name);
       });
       const meta = el('div', 'signal-meta');

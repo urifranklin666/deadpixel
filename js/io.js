@@ -19,6 +19,7 @@ export async function serializeDoc(doc) {
     name: doc.name, width: doc.width, height: doc.height,
     activeIndex: doc.activeIndex,
     effects: doc.effects || [],
+    signalSeed: doc.signalSeed >>> 0,
     layers: [],
   };
   const files = {};
@@ -74,6 +75,7 @@ export async function docFromFiles(files) {
   if (!doc.layers.length) doc.layers.push(new Layer(meta.width, meta.height, 'Background'));
   doc.activeIndex = Math.min(meta.activeIndex || 0, doc.layers.length - 1);
   doc.effects = Array.isArray(meta.effects) ? meta.effects : [];
+  if (Number.isFinite(meta.signalSeed)) doc.signalSeed = meta.signalSeed >>> 0;
   doc.dirty = false;
   return doc;
 }

@@ -453,17 +453,23 @@ option { background: #0a0607; }
 .rack-empty { padding: 18px 12px; border: 1px dashed var(--line); color: var(--ink-dim); font-size: 9px; letter-spacing: .12em; text-align: center; }
 .rack-module { margin-bottom: 6px; border: 1px solid var(--line); background: #080506; }
 .rack-module.bypassed { opacity: .48; }
-.rack-module-top { display: grid; grid-template-columns: 25px 1fr 23px 23px 23px; align-items: center; min-height: 34px; }
+.rack-module-top { display: grid; grid-template-columns: 25px 1fr 23px 23px 23px 23px; align-items: center; min-height: 34px; }
 .rack-module-top button { height: 100%; border: 0; border-right: 1px solid var(--line-dim); background: transparent; color: var(--ink-dim); cursor: pointer; }
 .rack-module-top button:hover { color: var(--red); background: rgba(255,34,51,.07); }
 .rack-module-top .rack-power { color: var(--red); }.rack-module-top .rack-delete { border-right: 0; }
 .rack-module-name { overflow: hidden; padding: 0 7px; color: var(--ink) !important; font: 14px var(--osd); letter-spacing: .06em; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .rack-controls { display: none; padding: 10px; border-top: 1px solid var(--line-dim); background: var(--black); }
 .rack-module.open .rack-controls { display: grid; gap: 9px; }
-.rack-param { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 10px; color: var(--ink-dim); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
+.rack-param { display: grid; grid-template-columns: 1fr 22px auto; align-items: center; gap: 4px 7px; color: var(--ink-dim); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
 .rack-param output { color: var(--red); font: 14px var(--osd); }
 .rack-param input { grid-column: 1 / -1; width: 100%; }
+.rack-param-lock { border: 0; background: transparent; color: var(--red-dim); cursor: pointer; }
 .rack-fixed { color: var(--ink-dim); font-size: 9px; letter-spacing: .12em; text-align: center; }
+.rack-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-bottom: 10px; }
+.rack-tools button { padding: 7px 5px; border: 1px solid var(--line); background: transparent; color: var(--ink); font: 13px var(--osd); letter-spacing: .08em; cursor: pointer; }
+.rack-tools button:hover,.rack-tools button.on { border-color: var(--red); background: var(--red); color: var(--black); }
+.rack-seed { grid-column: 1 / -1; display: flex; justify-content: space-between; padding: 7px 9px; border-left: 4px solid var(--red); background: var(--black); color: var(--ink-dim); font-size: 9px; letter-spacing: .14em; }
+.rack-seed code { color: var(--red); font: 15px var(--osd); }
 .action-row .a-del:hover { color: var(--red); }
 
 /* stamps popup grid (in options bar popover) */
