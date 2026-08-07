@@ -298,6 +298,7 @@ export class Doc extends EventTarget {
     this.activeIndex = 0;
     this.selection = null;
     this.effects = [];
+    this.signalSeed = (Math.random() * 0xffffffff) >>> 0;
     this.effectProcessor = null;
     this.history = new History();
     this.dirty = false;         // unsaved changes
@@ -332,7 +333,7 @@ export class Doc extends EventTarget {
       }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
-      if (!this._effectsBypassed && this.effects.length && this.effectProcessor) this.effectProcessor(this._compo, this.effects);
+      if (!this._effectsBypassed && this.effects.length && this.effectProcessor) this.effectProcessor(this._compo, this.effects, this.signalSeed);
       this._compoDirty = false;
     }
     return this._compo;
@@ -347,12 +348,13 @@ export class Doc extends EventTarget {
     return c;
   }
 
-  replaceEffects(next, label = 'Signal rack') {
+  replaceEffects(next, label = 'Signal rack', nextSeed = this.signalSeed) {
     const clone = (v) => JSON.parse(JSON.stringify(v));
     const before = clone(this.effects), after = clone(next);
-    const apply = (value) => { this.effects = clone(value); this.changed(); };
-    this.history.push(label, () => apply(before), () => apply(after));
-    apply(after);
+    const beforeSeed = this.signalSeed >>> 0, afterSeed = nextSeed >>> 0;
+    const apply = (value, seed) => { this.effects = clone(value); this.signalSeed = seed; this.changed(); };
+    this.history.push(label, () => apply(before, beforeSeed), () => apply(after, afterSeed));
+    apply(after, afterSeed);
   }
 
   /* ---- structural ops (history-recorded) ---- */

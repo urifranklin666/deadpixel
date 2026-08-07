@@ -2,6 +2,21 @@
 
 import { makeCanvas, copyCanvas, clamp } from './engine.js';
 
+function seeded(seed) {
+  let a = (Number(seed) || 0x6d2b79f5) >>> 0;
+  return () => {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function hashSeed(value) {
+  let h = 2166136261;
+  for (const ch of String(value)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
 const cl = (v) => v < 0 ? 0 : v > 255 ? 255 : v;
 
 /* ---- pixel helpers ------------------------------------------------------ */
@@ -279,14 +294,15 @@ export const FILTERS = [
     ],
     apply(img, w, h, p) {
       const amt = p.amount * 1.4;
+      const rnd = p._seed == null ? Math.random : seeded(p._seed);
       return perPixel(img, (d, i) => {
         if (p.mono) {
-          const n = (Math.random() - .5) * amt;
+          const n = (rnd() - .5) * amt;
           d[i] = cl(d[i] + n); d[i + 1] = cl(d[i + 1] + n); d[i + 2] = cl(d[i + 2] + n);
         } else {
-          d[i] = cl(d[i] + (Math.random() - .5) * amt);
-          d[i + 1] = cl(d[i + 1] + (Math.random() - .5) * amt);
-          d[i + 2] = cl(d[i + 2] + (Math.random() - .5) * amt);
+          d[i] = cl(d[i] + (rnd() - .5) * amt);
+          d[i + 1] = cl(d[i + 1] + (rnd() - .5) * amt);
+          d[i + 2] = cl(d[i + 2] + (rnd() - .5) * amt);
         }
       });
     },
@@ -356,10 +372,11 @@ export const FILTERS = [
     apply(img, w, h, p) {
       const src = new Uint8ClampedArray(img.data);
       const d = img.data;
+      const rnd = p._seed == null ? Math.random : seeded(p._seed);
       for (let b = 0; b < p.bands; b++) {
-        const by = Math.floor(Math.random() * h);
-        const bh = 2 + Math.floor(Math.random() * Math.max(3, h * .02));
-        const shift = Math.floor((Math.random() - .3) * p.shift);
+        const by = Math.floor(rnd() * h);
+        const bh = 2 + Math.floor(rnd() * Math.max(3, h * .02));
+        const shift = Math.floor((rnd() - .3) * p.shift);
         for (let y = by; y < Math.min(by + bh, h); y++) {
           for (let x = 0; x < w; x++) {
             const sx = clamp(x - shift, 0, w - 1);
@@ -415,7 +432,8 @@ export const FILTERS = [
     ],
     apply(img, w, h, p) {
       const d = img.data, k = p.strength / 100;
-      const phase = Math.random() * Math.PI * 2;
+      const rnd = p._seed == null ? Math.random : seeded(p._seed);
+      const phase = rnd() * Math.PI * 2;
       for (let y = 0; y < h; y++) {
         const s = Math.sin(y / h * Math.PI * p.freq + phase) * 40 * k;
         for (let x = 0; x < w; x++) {
@@ -456,14 +474,18 @@ export function defaultParams(filterId) {
   return p;
 }
 
-export function processSignalStack(canvas, effects) {
+export function processSignalStack(canvas, effects, seed = 0) {
   const layer = { canvas, ctx: canvas.getContext('2d', { willReadFrequently: true }) };
   const doc = { selection: null };
-  for (const effect of effects || []) {
+  for (let i = 0; i < (effects || []).length; i++) {
+    const effect = effects[i];
     if (effect.enabled === false) continue;
-    applyFilterToLayer(doc, layer, effect.filter, { ...defaultParams(effect.filter), ...(effect.params || {}) });
+    const effectSeed = hashSeed(`${seed}:${effect.id || effect.filter}:${i}`);
+    applyFilterToLayer(doc, layer, effect.filter, { ...defaultParams(effect.filter), ...(effect.params || {}), _seed: effectSeed });
   }
 }
+
+export { seeded, hashSeed };
 
 /* ---- actions ------------------------------------------------------------
    An action = named sequence of {filter, params} steps. */
