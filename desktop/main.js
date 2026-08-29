@@ -21,11 +21,16 @@ function serve() {
     const server = http.createServer((req, res) => {
       let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
       if (p.endsWith('/')) p += 'index.html';
-      const file = path.normalize(path.join(SITE, p));
-      if (!file.startsWith(SITE)) { res.writeHead(403); res.end(); return; }
+      const file = path.resolve(SITE, '.' + p);
+      const relative = path.relative(SITE, file);
+      if (relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) { res.writeHead(403); res.end(); return; }
       fs.readFile(file, (err, data) => {
         if (err) { res.writeHead(404); res.end('not found'); return; }
-        res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+        res.writeHead(200, {
+          'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+          'Content-Security-Policy': "default-src 'self'; img-src 'self' blob: data:; font-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'",
+          'X-Content-Type-Options': 'nosniff',
+        });
         res.end(data);
       });
     });
@@ -45,9 +50,18 @@ app.whenReady().then(async () => {
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
   // external links (deadplug.digital) open in the real browser
+  const openExternal = (url) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+  };
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    openExternal(url);
     return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    const target = new URL(url);
+    if (target.hostname === '127.0.0.1' && target.port === String(port)) return;
+    event.preventDefault();
+    openExternal(url);
   });
   win.loadURL(`http://127.0.0.1:${port}/`);
 });

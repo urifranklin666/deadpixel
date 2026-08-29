@@ -3,8 +3,8 @@
 import { Doc, Layer, TextLayer, clamp, makeCanvas } from './engine.js';
 import { TOOLS, toolById, transformTool } from './tools.js';
 import * as UI from './ui.js';
-import { openDpx, loadImageFile, docFromImage, autosave, loadAutosave, clearAutosave, docFromFiles } from './io.js';
-import { processSignalStack } from './filters.js';
+import { openDpx, loadImageFile, docFromImage, autosave, loadAutosave, clearAutosave, docFromFiles, setAutosaveReporter } from './io.js';
+import { processSignalStack, processSignalStackAsync } from './filters.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -46,6 +46,12 @@ class App {
   attachDoc(doc) {
     this.doc = doc;
     doc.effectProcessor = processSignalStack;
+    doc.effectProcessorAsync = processSignalStackAsync;
+    doc.onProcessingChange = (active) => {
+      const indicator = $('#st-processing');
+      indicator.hidden = !active;
+      indicator.classList.toggle('on', active);
+    };
     if (this.pendingRecipe) {
       doc.effects = this.pendingRecipe.effects;
       doc.signalSeed = this.pendingRecipe.seed;
@@ -192,7 +198,7 @@ class App {
     ctx.imageSmoothingQuality = 'high';
     ctx.translate(panX, panY);
     ctx.scale(zoom, zoom);
-    ctx.drawImage(D.compose(), 0, 0);
+    ctx.drawImage(D.composePreview(() => this.requestRender()), 0, 0);
     // live stroke preview
     const stroke = this.tool?.previewStroke?.();
     if (stroke && stroke.layer === D.activeLayer) {
@@ -731,7 +737,7 @@ async function boot() {
 
   // PWA install prompt capture + service worker
   window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); app.installPrompt = e; });
-  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname))) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 
@@ -835,7 +841,15 @@ async function boot() {
   if (skipBoot) afterBoot();
 
   // autosave every 45s
-  setInterval(() => { if (app.doc?.dirty) autosave(app.doc); }, 45000);
+  setAutosaveReporter((state) => {
+    const status = $('#st-autosave');
+    clearTimeout(app._autosaveStatusTimer);
+    status.hidden = false;
+    status.textContent = state === 'saving' ? 'SAVING' : state === 'saved' ? 'SAVED' : 'SAVE FAILED';
+    status.classList.toggle('err', state === 'error');
+    if (state !== 'saving') app._autosaveStatusTimer = setTimeout(() => { status.hidden = true; }, 2500);
+  });
+  setInterval(() => { if (app.doc?.dirty && !app.doc.previewing) autosave(app.doc); }, 45000);
 
   // preload a few showcase fonts so the picker doesn't flash
   ['VT323', 'Big Shoulders'].forEach(f => app.ensureFont(f));

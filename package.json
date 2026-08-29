@@ -1,0 +1,14 @@
+{
+  "name": "deadpixel-workspace",
+  "version": "1.5.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "test:e2e": "playwright test",
+    "bench": "node benchmarks/processing.bench.js && node benchmarks/browser.bench.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}

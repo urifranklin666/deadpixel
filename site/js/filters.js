@@ -448,6 +448,110 @@ export const FILTERS = [
 
 export const filterById = (id) => FILTERS.find(f => f.id === id);
 
+export function processFilterPixels(data, w, h, filterId, params = {}) {
+  const f = filterById(filterId);
+  if (!f) throw new Error('Unknown filter: ' + filterId);
+  const pixels = data instanceof Uint8ClampedArray ? data : new Uint8ClampedArray(data);
+  f.apply({ data: pixels }, w, h, { ...defaultParams(filterId), ...params });
+  return pixels;
+}
+
+let processingWorker = null;
+let processingJobId = 0;
+const processingJobs = new Map();
+export const processingStats = { completed: 0, cancelled: 0, lastMs: 0 };
+
+function cancelProcessingJobs(kind) {
+  const matches = [...processingJobs.entries()].filter(([, job]) => job.kind === kind);
+  if (!matches.length) return;
+  for (const [id, job] of processingJobs) {
+    processingJobs.delete(id);
+    processingStats.cancelled++;
+    job.reject(new DOMException('Superseded processing job', 'AbortError'));
+  }
+  // Pixel kernels are synchronous inside the worker; termination is the only
+  // way to stop a currently running obsolete job rather than merely ignore it.
+  processingWorker?.terminate();
+  processingWorker = null;
+}
+
+function getProcessingWorker() {
+  if (processingWorker || typeof Worker === 'undefined') return processingWorker;
+  try {
+    processingWorker = new Worker(new URL('./processing-worker.js', import.meta.url), { type: 'module' });
+    processingWorker.onmessage = ({ data }) => {
+      const job = processingJobs.get(data.id);
+      if (!job) return;
+      processingJobs.delete(data.id);
+      processingStats.completed++;
+      processingStats.lastMs = performance.now() - job.started;
+      data.error ? job.reject(new Error(data.error)) : job.resolve(new Uint8ClampedArray(data.buffer));
+    };
+    processingWorker.onerror = (event) => {
+      for (const job of processingJobs.values()) {
+        try { job.resolve(job.fallback()); }
+        catch (error) { job.reject(error); }
+      }
+      processingJobs.clear();
+      processingWorker?.terminate();
+      processingWorker = null;
+    };
+  } catch (_) { processingWorker = null; }
+  return processingWorker;
+}
+
+export function processFilterPixelsAsync(data, w, h, filterId, params = {}) {
+  const worker = getProcessingWorker();
+  const pixels = new Uint8ClampedArray(data);
+  if (!worker) return Promise.resolve(processFilterPixels(pixels, w, h, filterId, params));
+  const id = ++processingJobId;
+  return new Promise((resolve, reject) => {
+    processingJobs.set(id, {
+      resolve, reject, kind: 'filter', started: performance.now(),
+      fallback: () => processFilterPixels(new Uint8ClampedArray(data), w, h, filterId, params),
+    });
+    worker.postMessage({ id, kind: 'filter', buffer: pixels.buffer, w, h, filterId, params }, [pixels.buffer]);
+  });
+}
+
+export function processSignalPixels(data, w, h, effects, seed = 0) {
+  const pixels = data instanceof Uint8ClampedArray ? data : new Uint8ClampedArray(data);
+  for (let i = 0; i < (effects || []).length; i++) {
+    const effect = effects[i];
+    if (effect.enabled === false) continue;
+    const effectSeed = hashSeed(`${seed}:${effect.id || effect.filter}:${i}`);
+    const mix = Math.max(0, Math.min(1, effect.mix == null ? 1 : effect.mix));
+    const before = mix < 1 || effect.mask ? new Uint8ClampedArray(pixels) : null;
+    processFilterPixels(pixels, w, h, effect.filter, { ...(effect.params || {}), _seed: effectSeed });
+    if (before) {
+      for (let p = 0; p < pixels.length; p += 4) {
+        let mask = 1;
+        if (effect.mask === 'luma') mask = (before[p] * .2126 + before[p + 1] * .7152 + before[p + 2] * .0722) / 255;
+        else if (effect.mask === 'alpha') mask = before[p + 3] / 255;
+        if (effect.maskInvert) mask = 1 - mask;
+        const amount = mix * mask;
+        for (let c = 0; c < 4; c++) pixels[p + c] = before[p + c] + (pixels[p + c] - before[p + c]) * amount;
+      }
+    }
+  }
+  return pixels;
+}
+
+export function processSignalPixelsAsync(data, w, h, effects, seed = 0) {
+  cancelProcessingJobs('signal');
+  const worker = getProcessingWorker();
+  const pixels = new Uint8ClampedArray(data);
+  if (!worker) return Promise.resolve(processSignalPixels(pixels, w, h, effects, seed));
+  const id = ++processingJobId;
+  return new Promise((resolve, reject) => {
+    processingJobs.set(id, {
+      resolve, reject, kind: 'signal', started: performance.now(),
+      fallback: () => processSignalPixels(new Uint8ClampedArray(data), w, h, effects, seed),
+    });
+    worker.postMessage({ id, kind: 'signal', buffer: pixels.buffer, w, h, effects, seed }, [pixels.buffer]);
+  });
+}
+
 /* Apply filter to a layer canvas, honoring selection mask. */
 export function applyFilterToLayer(doc, layer, filterId, params) {
   const f = filterById(filterId);
@@ -467,6 +571,23 @@ export function applyFilterToLayer(doc, layer, filterId, params) {
   }
 }
 
+export async function applyFilterToLayerAsync(doc, layer, filterId, params) {
+  const w = layer.canvas.width, h = layer.canvas.height;
+  const original = doc.selection ? copyCanvas(layer.canvas) : null;
+  const input = layer.ctx.getImageData(0, 0, w, h);
+  const pixels = await processFilterPixelsAsync(input.data, w, h, filterId, params);
+  const output = layer.ctx.createImageData(w, h);
+  output.data.set(pixels);
+  layer.ctx.putImageData(output, 0, 0);
+  if (doc.selection) {
+    const filtered = copyCanvas(layer.canvas);
+    doc.selection.maskCanvas(filtered);
+    layer.ctx.clearRect(0, 0, w, h);
+    layer.ctx.drawImage(original, 0, 0);
+    layer.ctx.drawImage(filtered, 0, 0);
+  }
+}
+
 export function defaultParams(filterId) {
   const f = filterById(filterId);
   const p = {};
@@ -475,14 +596,32 @@ export function defaultParams(filterId) {
 }
 
 export function processSignalStack(canvas, effects, seed = 0) {
-  const layer = { canvas, ctx: canvas.getContext('2d', { willReadFrequently: true }) };
-  const doc = { selection: null };
-  for (let i = 0; i < (effects || []).length; i++) {
-    const effect = effects[i];
-    if (effect.enabled === false) continue;
-    const effectSeed = hashSeed(`${seed}:${effect.id || effect.filter}:${i}`);
-    applyFilterToLayer(doc, layer, effect.filter, { ...defaultParams(effect.filter), ...(effect.params || {}), _seed: effectSeed });
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  processSignalPixels(image.data, canvas.width, canvas.height, effects, seed);
+  ctx.putImageData(image, 0, 0);
+}
+
+export function processSignalStackAsync(canvas, effects, seed = 0) {
+  const maxPreviewPixels = 2_000_000;
+  if (canvas.width * canvas.height > maxPreviewPixels) {
+    const scale = Math.sqrt(maxPreviewPixels / (canvas.width * canvas.height));
+    const w = Math.max(1, Math.round(canvas.width * scale));
+    const h = Math.max(1, Math.round(canvas.height * scale));
+    const preview = makeCanvas(w, h);
+    preview.getContext('2d').drawImage(canvas, 0, 0, w, h);
+    const pctx = preview.getContext('2d', { willReadFrequently: true });
+    const input = pctx.getImageData(0, 0, w, h);
+    return processSignalPixelsAsync(input.data, w, h, effects, seed).then((pixels) => {
+      const image = pctx.createImageData(w, h); image.data.set(pixels); pctx.putImageData(image, 0, 0);
+      const output = makeCanvas(canvas.width, canvas.height);
+      output.getContext('2d').drawImage(preview, 0, 0, output.width, output.height);
+      return output.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, output.width, output.height).data;
+    });
   }
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return processSignalPixelsAsync(image.data, canvas.width, canvas.height, effects, seed);
 }
 
 export { seeded, hashSeed };

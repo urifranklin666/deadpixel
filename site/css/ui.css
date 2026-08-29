@@ -504,6 +504,10 @@ option { background: #0a0607; }
 #st-hint { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; }
 #st-zoom, #st-pos, #st-size { color: var(--osd-white); }
 #st-sig { color: var(--red); }
+#st-processing { color: var(--red); letter-spacing: .12em; animation: procblink .8s steps(2) infinite; }
+#st-autosave { color: var(--muted); letter-spacing: .1em; }
+#st-autosave.err { color: var(--red); }
+@keyframes procblink { 50% { opacity: .35; } }
 
 /* --------------------------------------------------------------------------
    dialogs

@@ -1,3 +1,6 @@
+node_modules/
+test-results/
+playwright-report/
 desktop/node_modules/
 desktop/dist/
 site/downloads/*.exe

@@ -37,6 +37,9 @@ export class Layer {
     this.opacity = 1;
     this.blend = 'source-over';
     this.locked = false;
+    this.revision = 0;
+    this.effects = [];
+    this.signalSeed = (Math.random() * 0xffffffff) >>> 0;
     this.canvas = makeCanvas(w, h);
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
   }
@@ -44,6 +47,7 @@ export class Layer {
   clone() {
     const l = new Layer(this.canvas.width, this.canvas.height, this.name + ' copy');
     l.visible = this.visible; l.opacity = this.opacity; l.blend = this.blend;
+    l.effects = JSON.parse(JSON.stringify(this.effects)); l.signalSeed = this.signalSeed;
     l.ctx.drawImage(this.canvas, 0, 0);
     return l;
   }
@@ -97,6 +101,7 @@ export class TextLayer extends Layer {
   clone() {
     const l = new TextLayer(this.canvas.width, this.canvas.height, { name: this.name + ' copy', t: { ...this.t } });
     l.visible = this.visible; l.opacity = this.opacity; l.blend = this.blend;
+    l.effects = JSON.parse(JSON.stringify(this.effects)); l.signalSeed = this.signalSeed;
     return l;
   }
   rasterize() {
@@ -110,16 +115,25 @@ export class TextLayer extends Layer {
 /* --------------------------------------------------------------- history */
 
 export class History extends EventTarget {
-  constructor(cap = 40) {
+  constructor(cap = 40, maxBytes = 256 * 1024 * 1024) {
     super();
-    this.entries = [];  // {label, undo(), redo()}
+    this.entries = [];  // {label, undo(), redo(), bytes}
     this.index = -1;    // last applied entry
     this.cap = cap;
+    this.maxBytes = maxBytes;
+    this.bytes = 0;
   }
-  push(label, undo, redo) {
-    this.entries.length = this.index + 1;
-    this.entries.push({ label, undo, redo });
-    if (this.entries.length > this.cap) this.entries.shift();
+  push(label, undo, redo, options = {}) {
+    const removedRedo = this.entries.splice(this.index + 1);
+    for (const entry of removedRedo) this.bytes -= entry.bytes || 0;
+    const entry = { label, undo, redo, bytes: Math.max(0, options.bytes || 0) };
+    this.entries.push(entry);
+    this.bytes += entry.bytes;
+    while (this.entries.length > 1 &&
+      (this.entries.length > this.cap || this.bytes > this.maxBytes)) {
+      const dropped = this.entries.shift();
+      this.bytes -= dropped.bytes || 0;
+    }
     this.index = this.entries.length - 1;
     this.dispatchEvent(new Event('change'));
   }
@@ -300,11 +314,16 @@ export class Doc extends EventTarget {
     this.effects = [];
     this.signalSeed = (Math.random() * 0xffffffff) >>> 0;
     this.effectProcessor = null;
+    this.effectProcessorAsync = null;
     this.history = new History();
     this.dirty = false;         // unsaved changes
     this._compo = makeCanvas(w, h);
     this._compoCtx = this._compo.getContext('2d', { willReadFrequently: true });
     this._compoDirty = true;
+    this._compoEffectsApplied = false;
+    this._compoGeneration = 0;
+    this._compoPending = null;
+    this.onProcessingChange = null;
 
     const base = new Layer(w, h, 'Background');
     if (opts.bg && opts.bg !== 'transparent') {
@@ -318,24 +337,78 @@ export class Doc extends EventTarget {
   changed(structural = false) {
     this.dirty = true;
     this._compoDirty = true;
+    this._compoEffectsApplied = false;
+    this._compoGeneration++;
     this.dispatchEvent(new CustomEvent('change', { detail: { structural } }));
   }
 
-  compose() {
+  _buildCompositeBase() {
     if (this._compoDirty) {
+      // Also invalidates jobs when callers toggle preview-only state directly.
+      this._compoGeneration++;
+      if (this._compoPending) this.onProcessingChange?.(false);
+      this._compoPending = null;
       const ctx = this._compoCtx;
       ctx.clearRect(0, 0, this.width, this.height);
       for (const l of this.layers) {
         if (!l.visible || l.opacity <= 0) continue;
         ctx.globalAlpha = l.opacity;
         ctx.globalCompositeOperation = l.blend;
-        l.draw(ctx);
+        if (!l._effectsBypassed && l.effects?.length && this.effectProcessor) {
+          const cacheKey = l.revision + ':' + l.signalSeed + ':' + JSON.stringify(l.effects);
+          if (l._effectCacheKey !== cacheKey) {
+            l._effectCache = copyCanvas(l.canvas);
+            this.effectProcessor(l._effectCache, l.effects, l.signalSeed);
+            l._effectCacheKey = cacheKey;
+          }
+          ctx.drawImage(l._effectCache, 0, 0);
+        } else l.draw(ctx);
       }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
-      if (!this._effectsBypassed && this.effects.length && this.effectProcessor) this.effectProcessor(this._compo, this.effects, this.signalSeed);
       this._compoDirty = false;
+      this._compoEffectsApplied = this._effectsBypassed || !this.effects.length;
     }
+  }
+
+  compose() {
+    this._buildCompositeBase();
+    if (!this._compoEffectsApplied && this.effectProcessor) {
+      this._compoGeneration++;
+      this._compoPending = null;
+      this.effectProcessor(this._compo, this.effects, this.signalSeed);
+      this._compoEffectsApplied = true;
+    }
+    return this._compo;
+  }
+
+  composePreview(onReady) {
+    this._buildCompositeBase();
+    if (this._compoEffectsApplied || this._compoPending) return this._compo;
+    if (!this.effectProcessorAsync) return this.compose();
+    const token = { generation: this._compoGeneration };
+    this._compoPending = token;
+    this.onProcessingChange?.(true);
+    this.effectProcessorAsync(this._compo, this.effects, this.signalSeed).then((pixels) => {
+      if (this._compoPending !== token) return;
+      this._compoPending = null;
+      this.onProcessingChange?.(false);
+      if (this._compoDirty || token.generation !== this._compoGeneration) return;
+      const image = this._compoCtx.createImageData(this.width, this.height);
+      image.data.set(pixels);
+      this._compoCtx.putImageData(image, 0, 0);
+      this._compoEffectsApplied = true;
+      onReady?.();
+    }).catch(() => {
+      if (this._compoPending !== token) return;
+      this._compoPending = null;
+      this.onProcessingChange?.(false);
+      if (!this._compoDirty && token.generation === this._compoGeneration) {
+        this.effectProcessor?.(this._compo, this.effects, this.signalSeed);
+        this._compoEffectsApplied = true;
+        onReady?.();
+      }
+    });
     return this._compo;
   }
 
@@ -353,6 +426,18 @@ export class Doc extends EventTarget {
     const before = clone(this.effects), after = clone(next);
     const beforeSeed = this.signalSeed >>> 0, afterSeed = nextSeed >>> 0;
     const apply = (value, seed) => { this.effects = clone(value); this.signalSeed = seed; this.changed(); };
+    this.history.push(label, () => apply(before, beforeSeed), () => apply(after, afterSeed));
+    apply(after, afterSeed);
+  }
+
+  replaceLayerEffects(layer, next, label = 'Layer signal rack', nextSeed = layer.signalSeed) {
+    if (!layer) return;
+    const clone = (v) => JSON.parse(JSON.stringify(v));
+    const before = clone(layer.effects || []), after = clone(next);
+    const beforeSeed = layer.signalSeed >>> 0, afterSeed = nextSeed >>> 0;
+    const apply = (value, seed) => {
+      layer.effects = clone(value); layer.signalSeed = seed; layer._effectCacheKey = null; this.changed();
+    };
     this.history.push(label, () => apply(before, beforeSeed), () => apply(after, afterSeed));
     apply(after, afterSeed);
   }
@@ -443,20 +528,48 @@ export class Doc extends EventTarget {
     const wasText = layer.type === 'text' ? { ...layer.t } : null;
     fn();
     const after = copyCanvas(layer.canvas);
+    layer.revision++;
     const isText = layer.type === 'text' ? { ...layer.t } : null;
     this.history.push(label,
       () => {
         layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
         layer.ctx.drawImage(before, 0, 0);
+        layer.revision++;
         if (wasText && layer.type === 'text') layer.t = { ...wasText };
         this.changed();
       },
       () => {
         layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
         layer.ctx.drawImage(after, 0, 0);
+        layer.revision++;
         if (isText && layer.type === 'text') layer.t = { ...isText };
         this.changed();
-      });
+      }, { bytes: before.width * before.height * 4 * 2 });
+    this.changed();
+  }
+
+  async withLayerSnapshotAsync(label, layer, fn) {
+    const before = copyCanvas(layer.canvas);
+    const wasText = layer.type === 'text' ? { ...layer.t } : null;
+    await fn();
+    const after = copyCanvas(layer.canvas);
+    layer.revision++;
+    const isText = layer.type === 'text' ? { ...layer.t } : null;
+    this.history.push(label,
+      () => {
+        layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+        layer.ctx.drawImage(before, 0, 0);
+        layer.revision++;
+        if (wasText && layer.type === 'text') layer.t = { ...wasText };
+        this.changed();
+      },
+      () => {
+        layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+        layer.ctx.drawImage(after, 0, 0);
+        layer.revision++;
+        if (isText && layer.type === 'text') layer.t = { ...isText };
+        this.changed();
+      }, { bytes: before.width * before.height * 4 * 2 });
     this.changed();
   }
 
