@@ -332,7 +332,7 @@ function windowsDialog(app) {
       'You get a windowed app with its own icon that works offline and updates itself.<br><br>' +
       '<b>2 · WINDOWS INSTALLER (.exe)</b><br>' +
       'A classic installer with Start-menu entry, offline forever:<br>' +
-      '<a href="downloads/DeadPixel-Setup-1.5.0.exe" download>⭳ DeadPixel-Setup-1.5.0.exe</a>'));
+      '<a href="https://github.com/urifranklin666/deadpixel/releases/download/v1.5.0/DeadPixel-Setup-1.5.0.exe">⭳ DeadPixel-Setup-1.5.0.exe</a>'));
     const btnRow = el('div', 'dlg-row');
     if (app.installPrompt) {
       const b = el('button', 'btn primary', 'INSTALL AS APP NOW');
