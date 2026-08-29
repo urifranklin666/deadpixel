@@ -313,6 +313,7 @@ export class Doc extends EventTarget {
     this.selection = null;
     this.effects = [];
     this.signalMasks = new Map();
+    this.maskRevision = 0;
     this.signalSeed = (Math.random() * 0xffffffff) >>> 0;
     this.effectProcessor = null;
     this.effectProcessorAsync = null;
@@ -372,7 +373,10 @@ export class Doc extends EventTarget {
         ctx.globalAlpha = l.opacity;
         ctx.globalCompositeOperation = l.blend;
         if (!l._effectsBypassed && l.effects?.length && this.effectProcessor) {
-          const cacheKey = l.revision + ':' + l.signalSeed + ':' + JSON.stringify(l.effects);
+          const cacheKey = l.revision + ':' + this.maskRevision + ':' + l.signalSeed + ':' + JSON.stringify(l.effects);
+          if (l._signalStageCache?.inputRevision !== l.revision || l._signalStageCache?.maskRevision !== this.maskRevision) {
+            l._signalStageCache = { inputRevision: l.revision, maskRevision: this.maskRevision };
+          }
           if (l._effectCacheKey !== cacheKey) {
             if (preview && this.effectProcessorAsync) {
               if (l._effectPendingKey !== cacheKey) {
@@ -380,10 +384,10 @@ export class Doc extends EventTarget {
                 const token = {}; l._effectPending = token; l._effectPendingKey = cacheKey;
                 this.onProcessingChange?.(true);
                 const input = copyCanvas(l.canvas);
-                this.effectProcessorAsync(input, l.effects, l.signalSeed).then((pixels) => {
+                this.effectProcessorAsync(input, l.effects, l.signalSeed, l._signalStageCache ||= {}).then((pixels) => {
                   if (l._effectPending !== token) return;
                   l._effectPending = null; l._effectPendingKey = null; this.onProcessingChange?.(false);
-                  if (l.revision + ':' + l.signalSeed + ':' + JSON.stringify(l.effects) !== cacheKey) return;
+                  if (l.revision + ':' + this.maskRevision + ':' + l.signalSeed + ':' + JSON.stringify(l.effects) !== cacheKey) return;
                   const output = makeCanvas(this.width, this.height), image = output.getContext('2d').createImageData(this.width, this.height);
                   image.data.set(pixels); output.getContext('2d').putImageData(image, 0, 0);
                   l._effectCache = output; l._effectCacheKey = cacheKey;
@@ -397,7 +401,7 @@ export class Doc extends EventTarget {
               if (l._effectPending) this.onProcessingChange?.(false);
               l._effectPending = null; l._effectPendingKey = null;
               l._effectCache = copyCanvas(l.canvas);
-              this.effectProcessor(l._effectCache, l.effects, l.signalSeed);
+              this.effectProcessor(l._effectCache, l.effects, l.signalSeed, l._signalStageCache ||= {});
               l._effectCacheKey = cacheKey;
             }
           }
@@ -406,6 +410,8 @@ export class Doc extends EventTarget {
       }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
+      const baseKey = this.maskRevision + '|' + this.layers.map(l => `${l.id}:${l.revision}:${l.visible}:${l.opacity}:${l.blend}:${l._effectCacheKey || ''}`).join('|');
+      if (this._signalStageCache?.baseKey !== baseKey) this._signalStageCache = { baseKey };
       this._compoDirty = false;
       this._compoEffectsApplied = this._effectsBypassed || !this.effects.length;
     }
@@ -416,7 +422,7 @@ export class Doc extends EventTarget {
     if (!this._compoEffectsApplied && this.effectProcessor) {
       this._compoGeneration++;
       this._compoPending = null;
-      this.effectProcessor(this._compo, this.effects, this.signalSeed);
+      this.effectProcessor(this._compo, this.effects, this.signalSeed, this._signalStageCache ||= {});
       this._compoEffectsApplied = true;
     }
     return this._compo;
@@ -429,7 +435,7 @@ export class Doc extends EventTarget {
     const token = { generation: this._compoGeneration };
     this._compoPending = token;
     this.onProcessingChange?.(true);
-    this.effectProcessorAsync(this._compo, this.effects, this.signalSeed).then((pixels) => {
+    this.effectProcessorAsync(this._compo, this.effects, this.signalSeed, this._signalStageCache ||= {}).then((pixels) => {
       if (this._compoPending !== token) return;
       this._compoPending = null;
       this.onProcessingChange?.(false);
