@@ -3,7 +3,7 @@
 import { BLEND_MODES, Selection, hexToRgb, rgbToHex, hsvToRgb, rgbToHsv, clamp, makeCanvas } from './engine.js';
 import { TOOLS, toolById, iconSvg } from './tools.js';
 import { BRUSH_PRESETS, renderTip, STAMPS, renderStamp } from './brushes.js';
-import { FILTERS, filterById, defaultParams, applyFilterToLayer, BUILTIN_ACTIONS, seeded } from './filters.js';
+import { FILTERS, filterById, defaultParams, applyFilterToLayer, applyFilterToLayerAsync, processFilterPixelsAsync, BUILTIN_ACTIONS, seeded } from './filters.js';
 import { saveDpx, openDpx, exportDoc, downloadBlob, loadImageFile, docFromImage } from './io.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -17,7 +17,7 @@ const el = (tag, cls, html) => {
 export function recipeToHash(doc) {
   const payload = {
     v: 1, s: doc.signalSeed >>> 0,
-    e: (doc.effects || []).map(x => [x.filter, x.params || {}, x.enabled !== false, !!x.locked, x.paramLocks || {}]),
+    e: (doc.effects || []).map(x => [x.filter, x.params || {}, x.enabled !== false, !!x.locked, x.paramLocks || {}, x.mix == null ? 1 : x.mix]),
   };
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
   let raw = ''; bytes.forEach(b => raw += String.fromCharCode(b));
@@ -31,7 +31,7 @@ export function recipeFromHash(hash = location.hash) {
     const bin = atob(raw), bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
     const p = JSON.parse(new TextDecoder().decode(bytes));
     if (p.v !== 1 || !Array.isArray(p.e)) return null;
-    return { seed: p.s >>> 0, effects: p.e.map((x, i) => ({ id: `shared_${i}`, filter: x[0], params: x[1] || {}, enabled: x[2] !== false, locked: !!x[3], paramLocks: x[4] || {} })) };
+    return { seed: p.s >>> 0, effects: p.e.map((x, i) => ({ id: `shared_${i}`, filter: x[0], params: x[1] || {}, enabled: x[2] !== false, locked: !!x[3], paramLocks: x[4] || {}, mix: x[5] == null ? 1 : x[5] })) };
   } catch (_) { return null; }
 }
 
@@ -184,7 +184,7 @@ export async function filterDialog(app, filterId) {
   const params = { ...defaultParams(filterId) };
 
   if (!f.params.length) {
-    D.withLayerSnapshot(f.name, layer, () => applyFilterToLayer(D, layer, filterId, params));
+    await D.withLayerSnapshotAsync(f.name, layer, () => applyFilterToLayerAsync(D, layer, filterId, params));
     app.noteFilter(filterId, params);
     app.requestRender();
     return;
@@ -192,18 +192,36 @@ export async function filterDialog(app, filterId) {
 
   const before = makeCanvas(layer.canvas.width, layer.canvas.height);
   before.getContext('2d').drawImage(layer.canvas, 0, 0);
-  let previewTimer = null;
+  let previewTimer = null, previewGeneration = 0;
   const preview = () => {
+    D.previewing = true;
     clearTimeout(previewTimer);
-    previewTimer = setTimeout(() => {
+    const generation = ++previewGeneration;
+    previewTimer = setTimeout(async () => {
       layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
       layer.ctx.drawImage(before, 0, 0);
-      applyFilterToLayer(D, layer, filterId, params);
+      const previewParams = { ...params };
+      const input = layer.ctx.getImageData(0, 0, layer.canvas.width, layer.canvas.height);
+      const pixels = await processFilterPixelsAsync(input.data, layer.canvas.width, layer.canvas.height, filterId, previewParams);
+      if (generation !== previewGeneration) return;
+      const output = layer.ctx.createImageData(layer.canvas.width, layer.canvas.height);
+      output.data.set(pixels);
+      layer.ctx.putImageData(output, 0, 0);
+      if (D.selection) {
+        const filtered = makeCanvas(layer.canvas.width, layer.canvas.height);
+        filtered.getContext('2d').drawImage(layer.canvas, 0, 0);
+        D.selection.maskCanvas(filtered);
+        layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+        layer.ctx.drawImage(before, 0, 0);
+        layer.ctx.drawImage(filtered, 0, 0);
+      }
       D.changed();
       app.requestRender();
     }, 60);
   };
   const restore = () => {
+    D.previewing = false;
+    previewGeneration++;
     clearTimeout(previewTimer);
     layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
     layer.ctx.drawImage(before, 0, 0);
@@ -235,7 +253,7 @@ export async function filterDialog(app, filterId) {
 
   restore();
   if (ok) {
-    D.withLayerSnapshot(f.name, layer, () => applyFilterToLayer(D, layer, filterId, params));
+    await D.withLayerSnapshotAsync(f.name, layer, () => applyFilterToLayerAsync(D, layer, filterId, params));
     app.noteFilter(filterId, params);
   }
   app.requestRender();
@@ -276,7 +294,7 @@ async function exportDialog(app, format) {
 function aboutDialog() {
   dialog('ABOUT', (body) => {
     body.appendChild(el('div', 'about-hero', 'DEAD<em>PIXEL</em>'));
-    body.appendChild(el('div', 'about-osd', 'RASTER SURGERY SUITE · v1.4'));
+    body.appendChild(el('div', 'about-osd', 'RASTER SURGERY SUITE · v1.5'));
     body.appendChild(el('div', 'dlg-note',
       'A full-blooded image editor running entirely in your browser. Nothing you make here ever leaves your machine — no uploads, no accounts, no telemetry. Just you and the pixels.<br><br>' +
       'A transmission from <a href="https://deadplug.digital" target="_blank" rel="noopener">deadplug.digital</a> · CH.404'));
@@ -314,7 +332,7 @@ function windowsDialog(app) {
       'You get a windowed app with its own icon that works offline and updates itself.<br><br>' +
       '<b>2 · WINDOWS INSTALLER (.exe)</b><br>' +
       'A classic installer with Start-menu entry, offline forever:<br>' +
-      '<a href="downloads/DeadPixel-Setup-1.0.0.exe" download>⭳ DeadPixel-Setup-1.0.0.exe</a>'));
+      '<a href="downloads/DeadPixel-Setup-1.5.0.exe" download>⭳ DeadPixel-Setup-1.5.0.exe</a>'));
     const btnRow = el('div', 'dlg-row');
     if (app.installPrompt) {
       const b = el('button', 'btn primary', 'INSTALL AS APP NOW');
@@ -919,6 +937,10 @@ function buildHistoryPanel(app, host) {
 /* ---- actions panel ---- */
 function buildActionsPanel(app, host) {
   const [p, body] = panelShell('actions', 'SIGNAL RACK');
+  const scopeSel = el('select', 'rack-scope');
+  [['document', 'DOCUMENT OUTPUT'], ['layer', 'ACTIVE LAYER']].forEach(([value, label]) => {
+    const option = el('option', null, label); option.value = value; scopeSel.appendChild(option);
+  });
   const activeHead = el('div', 'rack-head');
   activeHead.append(el('span', null, 'LIVE CHAIN'), el('span', 'rack-count', '0 MODULES'));
   const activeList = el('div', 'rack-active');
@@ -931,7 +953,10 @@ function buildActionsPanel(app, host) {
   const saveBtn = el('button', null, 'SAVE');
   const shareBtn = el('button', null, 'COPY LINK');
   const bypassBtn = el('button', null, 'BYPASS');
-  rackTools.append(seedBox, mutateBtn, saveBtn, shareBtn, bypassBtn);
+  const snapABtn = el('button', null, 'SET A');
+  const snapBBtn = el('button', null, 'SET B');
+  const compareABtn = el('button', null, 'SHOW A');
+  rackTools.append(seedBox, mutateBtn, saveBtn, shareBtn, snapABtn, snapBBtn, compareABtn, bypassBtn);
   const presetHead = el('div', 'rack-head rack-presets');
   presetHead.append(el('span', null, 'RECIPE ARCHIVE'), el('span', null, 'NON-DESTRUCTIVE'));
   const list = el('div');
@@ -941,24 +966,34 @@ function buildActionsPanel(app, host) {
   note.style.marginTop = '8px';
   note.textContent = 'Modules process the composite without touching layer pixels. They are saved inside the DPX project and included in exports.';
   btns.appendChild(recBtn);
-  body.append(activeHead, rackTools, activeList, presetHead, list, btns, note);
+  body.append(scopeSel, activeHead, rackTools, activeList, presetHead, list, btns, note);
   host.appendChild(p);
 
   const userActions = () => JSON.parse(localStorage.getItem('deadpixel.actions') || '[]');
   const saveUserActions = (a) => localStorage.setItem('deadpixel.actions', JSON.stringify(a));
   const clone = (v) => JSON.parse(JSON.stringify(v));
-  const changeStack = (label, mutate) => {
+  let snapshots = { a: null, b: null }, showing = null;
+  const target = () => {
     const D = app.doc;
-    if (!D) return;
-    const next = clone(D.effects || []); mutate(next);
-    D.replaceEffects(next, label); app.requestRender(); refreshActive();
+    return scopeSel.value === 'layer' ? D?.activeLayer : D;
+  };
+  const replaceTarget = (next, label, seed = target()?.signalSeed) => {
+    const D = app.doc, T = target(); if (!D || !T) return;
+    if (T === D) D.replaceEffects(next, label, seed);
+    else D.replaceLayerEffects(T, next, label, seed);
+  };
+  scopeSel.addEventListener('change', () => { showing = null; refreshActive(); });
+  const changeStack = (label, mutate) => {
+    const T = target(); if (!T) return;
+    const next = clone(T.effects || []); mutate(next);
+    replaceTarget(next, label); app.requestRender(); refreshActive();
   };
 
   mutateBtn.addEventListener('click', () => {
-    const D = app.doc; if (!D?.effects.length) return;
+    const D = app.doc, T = target(); if (!T?.effects.length) return;
     const nextSeed = crypto.getRandomValues(new Uint32Array(1))[0];
     const rnd = seeded(nextSeed);
-    const next = clone(D.effects);
+    const next = clone(T.effects);
     next.forEach(effect => {
       if (effect.locked) return;
       const f = filterById(effect.filter);
@@ -969,34 +1004,50 @@ function buildActionsPanel(app, host) {
         effect.params[param.key] = param.min + Math.floor(rnd() * (steps + 1)) * param.step;
       }
     });
-    D.replaceEffects(next, 'Mutate signal', nextSeed); app.requestRender(); refreshActive();
+    replaceTarget(next, 'Mutate signal', nextSeed); app.requestRender(); refreshActive();
     toast('SIGNAL MUTATED · SEED ' + nextSeed.toString(16).padStart(8, '0').toUpperCase());
   });
-  bypassBtn.addEventListener('pointerdown', () => { if (app.doc) { app.doc._effectsBypassed = true; app.doc._compoDirty = true; app.requestRender(); bypassBtn.classList.add('on'); } });
-  const restoreBypass = () => { if (app.doc) { app.doc._effectsBypassed = false; app.doc._compoDirty = true; app.requestRender(); bypassBtn.classList.remove('on'); } };
+  const storeSnapshot = (slot) => {
+    const T = target(); if (!T) return;
+    snapshots[slot] = { effects: clone(T.effects), seed: T.signalSeed };
+    toast('SIGNAL SNAPSHOT ' + slot.toUpperCase() + ' STORED');
+  };
+  snapABtn.addEventListener('click', () => storeSnapshot('a'));
+  snapBBtn.addEventListener('click', () => storeSnapshot('b'));
+  compareABtn.addEventListener('click', () => {
+    const D = app.doc; if (!D) return;
+    const slot = showing === 'a' ? 'b' : 'a';
+    if (!snapshots[slot]) { toast('STORE SNAPSHOT ' + slot.toUpperCase() + ' FIRST', true); return; }
+    showing = slot;
+    replaceTarget(snapshots[slot].effects, 'Recall snapshot ' + slot.toUpperCase(), snapshots[slot].seed);
+    compareABtn.textContent = 'SHOW ' + (slot === 'a' ? 'B' : 'A');
+    refreshActive(); app.requestRender();
+  });
+  bypassBtn.addEventListener('pointerdown', () => { const T = target(); if (T && app.doc) { T._effectsBypassed = true; app.doc._compoDirty = true; app.requestRender(); bypassBtn.classList.add('on'); } });
+  const restoreBypass = () => { const T = target(); if (T && app.doc) { T._effectsBypassed = false; app.doc._compoDirty = true; app.requestRender(); bypassBtn.classList.remove('on'); } };
   ['pointerup','pointercancel','pointerleave'].forEach(ev => bypassBtn.addEventListener(ev, restoreBypass));
   saveBtn.addEventListener('click', async () => {
-    const D = app.doc; if (!D?.effects.length) return;
+    const D = app.doc, T = target(); if (!T?.effects.length) return;
     const name = await dialog('SAVE SIGNAL RECIPE', bodyEl => {
       const input = el('input'); input.type = 'text'; input.value = 'MY DAMAGE'; bodyEl.appendChild(row('Name', input)); return { input };
     }, [{ label: 'Cancel' }, { label: 'Save', primary: true, value: c => c.input.value.trim() || 'MY DAMAGE' }]);
     if (!name) return;
     const actions = userActions();
-    actions.push({ id: 'rack_' + Date.now(), name: name.toUpperCase(), seed: D.signalSeed >>> 0, steps: clone(D.effects).map(x => ({ filter: x.filter, params: x.params, enabled: x.enabled, locked: x.locked, paramLocks: x.paramLocks })) });
+    actions.push({ id: 'rack_' + Date.now(), name: name.toUpperCase(), seed: T.signalSeed >>> 0, steps: clone(T.effects).map(x => ({ filter: x.filter, params: x.params, enabled: x.enabled, locked: x.locked, paramLocks: x.paramLocks, mix: x.mix })) });
     saveUserActions(actions); refresh(); toast('RECIPE ARCHIVED: ' + name.toUpperCase());
   });
   shareBtn.addEventListener('click', async () => {
-    const D = app.doc; if (!D?.effects.length) return;
-    const url = location.origin + location.pathname + recipeToHash(D);
+    const T = target(); if (!T?.effects.length) return;
+    const url = location.origin + location.pathname + recipeToHash(T);
     try { await navigator.clipboard.writeText(url); toast('RECIPE LINK COPIED · SETTINGS ONLY'); }
     catch (_) { prompt('COPY RECIPE LINK', url); }
   });
 
   const refreshActive = () => {
-    const D = app.doc;
+    const D = app.doc, T = target();
     activeList.innerHTML = '';
-    const effects = D?.effects || [];
-    seedBox.querySelector('code').textContent = D ? D.signalSeed.toString(16).padStart(8, '0').toUpperCase() : '00000000';
+    const effects = T?.effects || [];
+    seedBox.querySelector('code').textContent = T ? T.signalSeed.toString(16).padStart(8, '0').toUpperCase() : '00000000';
     activeHead.querySelector('.rack-count').textContent = effects.length + (effects.length === 1 ? ' MODULE' : ' MODULES');
     if (!effects.length) { activeList.appendChild(el('div', 'rack-empty', 'CLEAN SIGNAL. ADD A RECIPE BELOW.')); return; }
     effects.forEach((effect, index) => {
@@ -1014,6 +1065,32 @@ function buildActionsPanel(app, host) {
       del.addEventListener('click', () => changeStack('Remove ' + f.name, s => s.splice(index, 1)));
       top.append(power, title, lock, up, down, del); module.appendChild(top);
       const controls = el('div', 'rack-controls');
+      const mixRow = el('label', 'rack-param');
+      const mixLabel = el('span', null, 'Mix');
+      const mixValue = el('output', null, Math.round((effect.mix == null ? 1 : effect.mix) * 100) + '%');
+      const mixInput = el('input'); mixInput.type = 'range'; mixInput.min = 0; mixInput.max = 100; mixInput.step = 1;
+      mixInput.value = Math.round((effect.mix == null ? 1 : effect.mix) * 100);
+      let mixBefore = null;
+      mixInput.addEventListener('pointerdown', () => { mixBefore = clone(T.effects); });
+      mixInput.addEventListener('input', () => {
+        T.effects[index].mix = parseInt(mixInput.value) / 100;
+        mixValue.textContent = mixInput.value + '%'; D.changed(); app.requestRender();
+      });
+      mixInput.addEventListener('change', () => {
+        const after = clone(T.effects), start = mixBefore || clone(T.effects); mixBefore = null;
+        T.effects = start; replaceTarget(after, f.name + ': Mix'); refreshActive();
+      });
+      mixRow.append(mixLabel, mixValue, mixInput); controls.appendChild(mixRow);
+      const maskRow = el('label', 'rack-param');
+      const maskLabel = el('span', null, 'Mask');
+      const maskSelect = el('select');
+      [['', 'NONE'], ['luma', 'LUMINANCE'], ['alpha', 'ALPHA']].forEach(([value, label]) => {
+        const option = el('option', null, label); option.value = value; option.selected = (effect.mask || '') === value; maskSelect.appendChild(option);
+      });
+      const invertMask = el('button', 'rack-param-lock', effect.maskInvert ? 'INV' : 'NOR'); invertMask.type = 'button';
+      maskSelect.addEventListener('change', () => changeStack(f.name + ': Mask', s => { s[index].mask = maskSelect.value || null; }));
+      invertMask.addEventListener('click', e => { e.preventDefault(); changeStack(f.name + ': Invert mask', s => { s[index].maskInvert = !s[index].maskInvert; } ); });
+      maskRow.append(maskLabel, invertMask, maskSelect); controls.appendChild(maskRow);
       for (const param of f.params) {
         const rowEl = el('label', 'rack-param');
         const lab = el('span', null, param.label); const val = el('output', null, String(effect.params?.[param.key] ?? param.def));
@@ -1021,15 +1098,15 @@ function buildActionsPanel(app, host) {
         paramLock.addEventListener('click', e => { e.preventDefault(); changeStack('Lock parameter', s => { s[index].paramLocks ||= {}; s[index].paramLocks[param.key] = !s[index].paramLocks[param.key]; }); });
         const input = el('input'); input.type = 'range'; input.min = param.min; input.max = param.max; input.step = param.step; input.value = effect.params?.[param.key] ?? param.def;
         let before = null;
-        input.addEventListener('focus', () => { before ||= clone(D.effects); });
-        input.addEventListener('pointerdown', () => { before = clone(D.effects); });
+        input.addEventListener('focus', () => { before ||= clone(T.effects); });
+        input.addEventListener('pointerdown', () => { before = clone(T.effects); });
         input.addEventListener('input', () => {
-          D.effects[index].params ||= {}; D.effects[index].params[param.key] = parseFloat(input.value);
+          T.effects[index].params ||= {}; T.effects[index].params[param.key] = parseFloat(input.value);
           val.textContent = input.value; D.changed(); app.requestRender();
         });
         input.addEventListener('change', () => {
-          const after = clone(D.effects); const start = before || clone(D.effects); before = null;
-          D.effects = start; D.replaceEffects(after, f.name + ': ' + param.label); refreshActive();
+          const after = clone(T.effects); const start = before || clone(T.effects); before = null;
+          T.effects = start; replaceTarget(after, f.name + ': ' + param.label); refreshActive();
         });
         rowEl.append(lab, paramLock, val, input); controls.appendChild(rowEl);
       }
@@ -1050,13 +1127,14 @@ function buildActionsPanel(app, host) {
       runB.addEventListener('click', () => {
         const D = app.doc;
         if (!D) return;
-        const next = clone(D.effects || []);
+        const T = target(); if (!T) return;
+        const next = clone(T.effects || []);
         next.push(...action.steps.map((step, i) => ({
           id: 'fx_' + Date.now().toString(36) + '_' + i,
           filter: step.filter, params: { ...defaultParams(step.filter), ...(step.params || {}) }, enabled: step.enabled !== false,
           locked: !!step.locked, paramLocks: step.paramLocks || {},
         })));
-        D.replaceEffects(next, 'Add recipe: ' + action.name, Number.isFinite(action.seed) ? action.seed : D.signalSeed);
+        replaceTarget(next, 'Add recipe: ' + action.name, Number.isFinite(action.seed) ? action.seed : T.signalSeed);
         app.requestRender(); refreshActive();
         toast('RECIPE PATCHED IN: ' + action.name);
       });
