@@ -23,6 +23,7 @@ try {
       app.doc.addLayer(layer);
     }
     app.doc.effects = [
+      { id: 'blur', filter: 'gaussian-blur', params: { radius: 4 } },
       { id: 'contrast', filter: 'brightness-contrast', params: { brightness: -8, contrast: 24 } },
       { id: 'noise', filter: 'noise', params: { amount: 12, mono: 1 }, mix: .65 },
     ];
@@ -30,13 +31,18 @@ try {
     const compositeStart = performance.now();
     app.doc.compose();
     const compositeMs = performance.now() - compositeStart;
+    app.doc.effects[2].params.amount = 13;
+    app.doc.changed();
+    const cachedStart = performance.now();
+    app.doc.compose();
+    const cachedMs = performance.now() - cachedStart;
     app.doc.changed();
     const previewStart = performance.now();
     app.doc.composePreview();
     while (app.doc._compoPending) await new Promise(requestAnimationFrame);
-    return { compositeMs, previewMs: performance.now() - previewStart, layers: app.doc.layers.length };
+    return { compositeMs, cachedMs, previewMs: performance.now() - previewStart, layers: app.doc.layers.length };
   });
-  console.log(`Browser 1080p/${result.layers} layers  sync composite ${result.compositeMs.toFixed(1)} ms  worker preview ${result.previewMs.toFixed(1)} ms`);
+  console.log(`Browser 1080p/${result.layers} layers  sync composite ${result.compositeMs.toFixed(1)} ms  cached tail ${result.cachedMs.toFixed(1)} ms  worker preview ${result.previewMs.toFixed(1)} ms`);
   await browser.close();
 } finally {
   server.kill('SIGTERM');

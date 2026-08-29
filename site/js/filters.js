@@ -459,7 +459,8 @@ export function processFilterPixels(data, w, h, filterId, params = {}) {
 let processingWorker = null;
 let processingJobId = 0;
 const processingJobs = new Map();
-export const processingStats = { completed: 0, cancelled: 0, lastMs: 0 };
+export const processingStats = { completed: 0, cancelled: 0, lastMs: 0, queued: 0, peakQueued: 0, stageHits: 0, stageMisses: 0, cacheBytes: 0, cacheLimited: false, previewScale: 1, moduleMs: {} };
+const MAX_STAGE_CACHE_BYTES = 64 * 1024 * 1024;
 
 function cancelProcessingJobs(kind) {
   const matches = [...processingJobs.entries()].filter(([, job]) => job.kind === kind);
@@ -483,8 +484,10 @@ function getProcessingWorker() {
       const job = processingJobs.get(data.id);
       if (!job) return;
       processingJobs.delete(data.id);
+      processingStats.queued = processingJobs.size;
       processingStats.completed++;
       processingStats.lastMs = performance.now() - job.started;
+      if (job.module) processingStats.moduleMs[job.module] = Math.round(processingStats.lastMs * 10) / 10;
       data.error ? job.reject(new Error(data.error)) : job.resolve(new Uint8ClampedArray(data.buffer));
     };
     processingWorker.onerror = (event) => {
@@ -510,6 +513,7 @@ export function processFilterPixelsAsync(data, w, h, filterId, params = {}) {
       resolve, reject, kind: 'filter', started: performance.now(),
       fallback: () => processFilterPixels(new Uint8ClampedArray(data), w, h, filterId, params),
     });
+    processingStats.queued = processingJobs.size; processingStats.peakQueued = Math.max(processingStats.peakQueued, processingStats.queued);
     worker.postMessage({ id, kind: 'filter', buffer: pixels.buffer, w, h, filterId, params }, [pixels.buffer]);
   });
 }
@@ -519,7 +523,7 @@ export function processSignalPixels(data, w, h, effects, seed = 0) {
   for (let i = 0; i < (effects || []).length; i++) {
     const effect = effects[i];
     if (effect.enabled === false) continue;
-    const effectSeed = hashSeed(`${seed}:${effect.id || effect.filter}:${i}`);
+    const effectSeed = hashSeed(`${seed}:${effect.id || effect.filter}:${effect._signalIndex ?? i}`);
     const mix = Math.max(0, Math.min(1, effect.mix == null ? 1 : effect.mix));
     const before = mix < 1 || effect.mask ? new Uint8ClampedArray(pixels) : null;
     processFilterPixels(pixels, w, h, effect.filter, { ...(effect.params || {}), _seed: effectSeed });
@@ -546,8 +550,10 @@ export function processSignalPixelsAsync(data, w, h, effects, seed = 0) {
   return new Promise((resolve, reject) => {
     processingJobs.set(id, {
       resolve, reject, kind: 'signal', started: performance.now(),
+      module: effects?.length === 1 ? effects[0].filter : null,
       fallback: () => processSignalPixels(new Uint8ClampedArray(data), w, h, effects, seed),
     });
+    processingStats.queued = processingJobs.size; processingStats.peakQueued = Math.max(processingStats.peakQueued, processingStats.queued);
     worker.postMessage({ id, kind: 'signal', buffer: pixels.buffer, w, h, effects, seed }, [pixels.buffer]);
   });
 }
@@ -595,17 +601,46 @@ export function defaultParams(filterId) {
   return p;
 }
 
-export function processSignalStack(canvas, effects, seed = 0) {
+function stageKeys(effects, seed) {
+  let prefix = String(seed >>> 0);
+  return (effects || []).map((effect, index) => prefix += '|' + JSON.stringify({ ...effect, maskPixels: effect.maskPixels ? `mask:${effect.maskId || index}` : null }));
+}
+
+function stageStart(cache, keys) {
+  if (!cache?.keys || !cache?.stages) return 0;
+  let start = 0;
+  while (start < keys.length && cache.keys[start] === keys[start] && cache.stages[start]) start++;
+  processingStats.stageHits += start; processingStats.stageMisses += keys.length - start;
+  return start;
+}
+
+function storeStage(cache, index, keys, pixels) {
+  if (!cache) return;
+  cache.keys = keys; cache.stages ||= [];
+  const bytes = pixels.byteLength * (index + 1);
+  if (bytes <= MAX_STAGE_CACHE_BYTES) cache.stages[index] = new Uint8ClampedArray(pixels);
+  else processingStats.cacheLimited = true;
+  processingStats.cacheBytes = cache.stages.reduce((sum, stage) => sum + (stage?.byteLength || 0), 0);
+}
+
+export function processSignalStack(canvas, effects, seed = 0, cache = null) {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  processSignalPixels(image.data, canvas.width, canvas.height, effects, seed);
+  const keys = stageKeys(effects, seed), start = stageStart(cache, keys);
+  if (start) image.data.set(cache.stages[start - 1]);
+  for (let i = start; i < (effects || []).length; i++) {
+    processSignalPixels(image.data, canvas.width, canvas.height, [{ ...effects[i], _signalIndex: i }], seed);
+    storeStage(cache, i, keys, image.data);
+  }
+  if (cache) { cache.keys = keys; cache.stages.length = keys.length; }
   ctx.putImageData(image, 0, 0);
 }
 
-export function processSignalStackAsync(canvas, effects, seed = 0) {
+export function processSignalStackAsync(canvas, effects, seed = 0, cache = null) {
   const maxPreviewPixels = 2_000_000;
   if (canvas.width * canvas.height > maxPreviewPixels) {
     const scale = Math.sqrt(maxPreviewPixels / (canvas.width * canvas.height));
+    processingStats.previewScale = scale;
     const w = Math.max(1, Math.round(canvas.width * scale));
     const h = Math.max(1, Math.round(canvas.height * scale));
     const preview = makeCanvas(w, h);
@@ -621,7 +656,17 @@ export function processSignalStackAsync(canvas, effects, seed = 0) {
   }
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  return processSignalPixelsAsync(image.data, canvas.width, canvas.height, effects, seed);
+  processingStats.previewScale = 1;
+  const keys = stageKeys(effects, seed), start = stageStart(cache, keys);
+  let pixels = start ? new Uint8ClampedArray(cache.stages[start - 1]) : image.data;
+  return (async () => {
+    for (let i = start; i < (effects || []).length; i++) {
+      pixels = await processSignalPixelsAsync(pixels, canvas.width, canvas.height, [{ ...effects[i], _signalIndex: i }], seed);
+      storeStage(cache, i, keys, pixels);
+    }
+    if (cache) { cache.keys = keys; cache.stages.length = keys.length; }
+    return pixels;
+  })();
 }
 
 export { seeded, hashSeed };

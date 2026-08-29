@@ -325,6 +325,10 @@ option { background: #0a0607; }
 #launch-recents .launch-kicker { width: 100%; }
 #launch-recents button { border: 1px solid var(--line); background: transparent; color: var(--ink); padding: 6px 9px; font: 10px var(--mono); cursor: pointer; }
 #launch-recents button:hover { border-color: var(--red); color: var(--red); }
+.recent-project { display: grid; grid-template-columns: 1fr auto auto; }
+.recent-project .recent-open { border-right: 0; }
+.recent-project .recent-pin { border-right: 0; padding-inline: 6px; }
+.recent-project .recent-forget { padding-inline: 7px; }
 .recovery-list { display: grid; gap: 8px; max-height: min(55vh, 480px); overflow: auto; }
 .recovery-card { display: grid; grid-template-columns: 112px 1fr auto; align-items: center; gap: 10px; width: 100%; padding: 7px; border: 1px solid var(--line); background: #090909; color: var(--ink); text-align: left; cursor: pointer; }
 .recovery-card.selected { border-color: var(--red); box-shadow: inset 3px 0 var(--red); }
@@ -335,6 +339,9 @@ option { background: #0a0607; }
 .mask-editor { display: block; max-width: min(70vw, 480px); max-height: 55vh; margin: 0 auto 10px; border: 1px solid var(--line); background: #000; image-rendering: pixelated; touch-action: none; cursor: crosshair; }
 .mask-tools { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: center; }
 .mask-tools span { color: var(--muted); font: 10px var(--mono); }
+.rack-mask-tools { display: grid; grid-template-columns: 1fr repeat(4, auto); align-items: center; gap: 5px; padding: 5px 0 9px; }
+.rack-mask-tools button { border: 1px solid var(--line); background: #090909; color: var(--muted); font: 9px var(--mono); padding: 5px; cursor: pointer; }
+.rack-mask-thumb { width: 96px; height: 54px; border: 1px solid var(--line); background: #000; cursor: crosshair; }
 
 /* --------------------------------------------------------------------------
    right panels

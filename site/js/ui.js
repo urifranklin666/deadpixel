@@ -7,6 +7,7 @@ import { FILTERS, filterById, defaultParams, applyFilterToLayer, applyFilterToLa
 import { saveProjectFile, openDpx, exportDoc, downloadBlob, loadImageFile, docFromImage } from './io.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
+export const APP_VERSION = '1.7.0';
 const el = (tag, cls, html) => {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -294,7 +295,7 @@ async function exportDialog(app, format) {
 function aboutDialog() {
   dialog('ABOUT', (body) => {
     body.appendChild(el('div', 'about-hero', 'DEAD<em>PIXEL</em>'));
-    body.appendChild(el('div', 'about-osd', 'RASTER SURGERY SUITE · v1.6'));
+    body.appendChild(el('div', 'about-osd', 'RASTER SURGERY SUITE · v' + APP_VERSION));
     body.appendChild(el('div', 'dlg-note',
       'A full-blooded image editor running entirely in your browser. Nothing you make here ever leaves your machine — no uploads, no accounts, no telemetry. Just you and the pixels.<br><br>' +
       'A transmission from <a href="https://deadplug.digital" target="_blank" rel="noopener">deadplug.digital</a> · CH.404'));
@@ -332,7 +333,7 @@ function windowsDialog(app) {
       'You get a windowed app with its own icon that works offline and updates itself.<br><br>' +
       '<b>2 · WINDOWS INSTALLER (.exe)</b><br>' +
       'A classic installer with Start-menu entry, offline forever:<br>' +
-      '<a href="https://github.com/urifranklin666/deadpixel/releases/download/v1.6.0/DeadPixel-Setup-1.6.0.exe">⭳ DeadPixel-Setup-1.6.0.exe</a>'));
+      '<a href="https://github.com/urifranklin666/deadpixel/releases/download/v1.7.0/DeadPixel-Setup-1.7.0.exe">⭳ DeadPixel-Setup-1.7.0.exe</a>'));
     const btnRow = el('div', 'dlg-row');
     if (app.installPrompt) {
       const b = el('button', 'btn primary', 'INSTALL AS APP NOW');
@@ -351,7 +352,7 @@ function windowsDialog(app) {
 function diagnostics(app) {
   const D = app.doc;
   return {
-    generatedAt: new Date().toISOString(), app: 'DEADPIXEL', version: '1.6.0',
+    generatedAt: new Date().toISOString(), app: 'DEADPIXEL', version: APP_VERSION,
     runtime: { userAgent: navigator.userAgent, language: navigator.language, online: navigator.onLine, deviceMemory: navigator.deviceMemory || null, hardwareConcurrency: navigator.hardwareConcurrency || null },
     capabilities: { workers: typeof Worker !== 'undefined', fileSystemAccess: 'showOpenFilePicker' in globalThis, offscreenCanvas: typeof OffscreenCanvas !== 'undefined', webGL2: !!document.createElement('canvas').getContext('webgl2') },
     document: D ? { width: D.width, height: D.height, layers: D.layers.length, documentModules: D.effects.length, layerModules: D.layers.reduce((n, layer) => n + (layer.effects?.length || 0), 0), masks: D.signalMasks.size, historyEntries: D.history.entries.length, historyBytes: D.history.bytes } : null,
@@ -368,6 +369,38 @@ function reportIssue(app) {
   const report = diagnostics(app);
   const body = `Describe what happened:\n\n\nDiagnostics (no image pixels or filenames):\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\``;
   window.open('https://github.com/urifranklin666/deadpixel/issues/new?title=' + encodeURIComponent('[Bug] ') + '&body=' + encodeURIComponent(body), '_blank', 'noopener');
+}
+
+function projectSettingsDialog() {
+  dialog('LOCAL PROJECT SETTINGS', body => {
+    const autosave = el('input'); autosave.type = 'checkbox'; autosave.checked = localStorage.getItem('deadpixel.autosave') !== 'off';
+    const count = numInput(parseInt(localStorage.getItem('deadpixel.recoveryCount') || '3'), 1, 10);
+    const updates = el('input'); updates.type = 'checkbox'; updates.checked = localStorage.getItem('deadpixel.updateChecks') !== 'off';
+    body.append(row('Autosave recovery', autosave), row('Recovery snapshots', count), row('Check for updates', updates), el('div', 'dlg-note', 'Project and recovery data remains on this device. Update checks request only the public DEADPIXEL version file.'));
+    return { save: () => { localStorage.setItem('deadpixel.autosave', autosave.checked ? 'on' : 'off'); localStorage.setItem('deadpixel.recoveryCount', String(Math.max(1, Math.min(10, parseInt(count.value) || 3)))); localStorage.setItem('deadpixel.updateChecks', updates.checked ? 'on' : 'off'); } };
+  }, [{ label: 'Cancel' }, { label: 'Save', primary: true, value: ctl => { ctl.save(); return true; } }]);
+}
+
+const versionParts = value => String(value).split('.').map(x => parseInt(x) || 0);
+const newerVersion = (remote, local) => {
+  const a = versionParts(remote), b = versionParts(local);
+  for (let i = 0; i < 3; i++) { if (a[i] !== b[i]) return a[i] > b[i]; }
+  return false;
+};
+
+export async function checkForUpdates(silent = false) {
+  try {
+    const desktop = location.protocol === 'file:' || location.hostname === '127.0.0.1';
+    const endpoint = desktop ? 'https://urifranklin666.github.io/deadpixel/version.json' : new URL('version.json', location.href).href;
+    const response = await fetch(endpoint + '?t=' + Date.now(), { cache: 'no-store' });
+    if (!response.ok) throw new Error('update endpoint unavailable');
+    const release = await response.json();
+    if (!newerVersion(release.version, APP_VERSION)) { if (!silent) toast('DEADPIXEL IS CURRENT · v' + APP_VERSION); return false; }
+    dialog('NEW TRANSMISSION · v' + release.version, body => body.append(el('div', 'dlg-note', (release.notes || []).map(note => '• ' + note).join('<br>'))), [
+      { label: 'Later' }, { label: 'Open Release', primary: true, value: () => { window.open(release.url, '_blank', 'noopener'); return true; } },
+    ]);
+    return true;
+  } catch (_) { if (!silent) toast('UPDATE CHECK FAILED', true); return false; }
 }
 
 /* ============================ commands ============================ */
@@ -443,6 +476,8 @@ export function buildCommands(app) {
     'help.shortcuts': { label: 'Keyboard Shortcuts', key: null, run: () => shortcutsDialog() },
     'help.diagnostics': { label: 'Export Diagnostics…', key: null, run: () => exportDiagnostics(app) },
     'help.report': { label: 'Report Issue… ↗', key: null, run: () => reportIssue(app) },
+    'help.projectsettings': { label: 'Local Project Settings…', key: null, run: () => projectSettingsDialog() },
+    'help.updates': { label: 'Check for Updates…', key: null, run: () => checkForUpdates(false) },
     'help.about': { label: 'About DEADPIXEL', key: null, run: () => aboutDialog() },
     'help.home': { label: 'deadplug.digital ↗', key: null, run: () => window.open('https://deadplug.digital', '_blank') },
   };
@@ -463,7 +498,7 @@ const MENU_LAYOUT = [
   ['SELECT', ['select.all', 'select.none', 'select.invert', null, 'select.bycolor']],
   ['FILTER', ['filter.repeat', null, { sub: 'ALL FILTERS', items: () => FILTERS.filter(f => f.group === 'filter').map(f => 'fx.' + f.id) }]],
   ['VIEW', ['view.zoomin', 'view.zoomout', 'view.fit', 'view.hundred', null, 'view.fullscreen']],
-  ['HELP', ['help.shortcuts', 'help.diagnostics', 'help.report', null, 'help.about', 'file.windows', 'help.home']],
+  ['HELP', ['help.shortcuts', 'help.projectsettings', 'help.updates', 'help.diagnostics', 'help.report', null, 'help.about', 'file.windows', 'help.home']],
 ];
 
 export function buildMenus(app) {
@@ -1061,7 +1096,7 @@ function buildActionsPanel(app, host) {
         sctx.clearRect(0, 0, D.width, D.height); sctx.drawImage(canvas, 0, 0, D.width, D.height);
         const pixels = sctx.getImageData(0, 0, D.width, D.height).data;
         for (let i = 0; i < alpha.length; i++) alpha[i] = pixels[i * 4 + 3];
-        D.changed(); app.requestRender();
+        D.maskRevision++; D.changed(); app.requestRender();
       } };
     }, [{ label: 'Cancel' }, { label: 'Apply', primary: true, value: ctl => { ctl.commit(); return true; } }]);
     refreshActive();
@@ -1171,6 +1206,29 @@ function buildActionsPanel(app, host) {
       invertMask.addEventListener('click', e => { e.preventDefault(); changeStack(f.name + ': Invert mask', s => { s[index].maskInvert = !s[index].maskInvert; } ); });
       editMaskBtn.addEventListener('click', e => { e.preventDefault(); editMask(index); });
       maskRow.append(maskLabel, invertMask, editMaskBtn, maskSelect); controls.appendChild(maskRow);
+      if (effect.mask === 'raster' && D.signalMasks.has(effect.maskId)) {
+        const maskTools = el('div', 'rack-mask-tools'), thumb = makeCanvas(96, 54), paintView = el('button', null, 'VIEW'), duplicate = el('button', null, 'DUP'), soften = el('button', null, 'SOFTEN'), remove = el('button', null, 'DELETE');
+        thumb.className = 'rack-mask-thumb';
+        const alpha = D.signalMasks.get(effect.maskId), preview = makeCanvas(D.width, D.height), pctx = preview.getContext('2d'), image = pctx.createImageData(D.width, D.height);
+        for (let i = 0; i < alpha.length; i++) image.data.set([255, 255, 255, alpha[i]], i * 4);
+        pctx.putImageData(image, 0, 0); thumb.getContext('2d').drawImage(preview, 0, 0, thumb.width, thumb.height);
+        thumb.addEventListener('click', () => editMask(index));
+        paintView.title = 'paint this mask directly over the image'; paintView.addEventListener('click', () => app.beginMaskPainting(effect.maskId));
+        duplicate.addEventListener('click', () => {
+          const id = D.createSignalMask(false); D.signalMasks.set(id, new Uint8ClampedArray(alpha));
+          changeStack('Duplicate paint mask', stack => { stack[index].mask = 'raster'; stack[index].maskId = id; });
+        });
+        soften.addEventListener('click', () => {
+          const src = makeCanvas(D.width, D.height), sctx = src.getContext('2d'), srcImage = sctx.createImageData(D.width, D.height);
+          for (let i = 0; i < alpha.length; i++) srcImage.data.set([255, 255, 255, alpha[i]], i * 4);
+          sctx.putImageData(srcImage, 0, 0); const out = makeCanvas(D.width, D.height), octx = out.getContext('2d', { willReadFrequently: true });
+          octx.filter = 'blur(4px)'; octx.drawImage(src, 0, 0); const rgba = octx.getImageData(0, 0, D.width, D.height).data;
+          for (let i = 0; i < alpha.length; i++) alpha[i] = rgba[i * 4 + 3];
+          D.maskRevision++; D.changed(); app.requestRender(); refreshActive();
+        });
+        remove.addEventListener('click', () => { const id = effect.maskId; changeStack('Delete paint mask', stack => { stack[index].mask = null; delete stack[index].maskId; }); D.signalMasks.delete(id); D.maskRevision++; });
+        maskTools.append(thumb, paintView, duplicate, soften, remove); controls.appendChild(maskTools);
+      }
       for (const param of f.params) {
         const rowEl = el('label', 'rack-param');
         const lab = el('span', null, param.label); const val = el('output', null, String(effect.params?.[param.key] ?? param.def));

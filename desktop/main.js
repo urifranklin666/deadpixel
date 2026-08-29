@@ -28,7 +28,7 @@ function serve() {
         if (err) { res.writeHead(404); res.end('not found'); return; }
         res.writeHead(200, {
           'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
-          'Content-Security-Policy': "default-src 'self'; img-src 'self' blob: data:; font-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'",
+          'Content-Security-Policy': "default-src 'self'; img-src 'self' blob: data:; font-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self' https://urifranklin666.github.io",
           'X-Content-Type-Options': 'nosniff',
         });
         res.end(data);

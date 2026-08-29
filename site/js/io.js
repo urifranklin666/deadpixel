@@ -308,8 +308,29 @@ export async function listRecentProjects() {
       req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
     });
     d.close();
-    return records.sort((a, b) => b.when - a.when).slice(0, 8);
+    return records.sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.when - a.when).slice(0, 12);
   } catch (_) { return []; }
+}
+
+export async function updateRecentProject(record, patch) {
+  if (!record?.name) return;
+  try {
+    const d = await db();
+    await new Promise((resolve, reject) => {
+      const tx = d.transaction(RECENT_STORE, 'readwrite');
+      tx.objectStore(RECENT_STORE).put({ ...record, ...patch }, record.name);
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    }); d.close();
+  } catch (_) { /* optional recent metadata */ }
+}
+
+export async function forgetRecentProject(record) {
+  if (!record?.name) return;
+  try {
+    const d = await db();
+    await new Promise(resolve => { const tx = d.transaction(RECENT_STORE, 'readwrite'); tx.objectStore(RECENT_STORE).delete(record.name); tx.oncomplete = resolve; tx.onerror = resolve; });
+    d.close();
+  } catch (_) { /* optional recent metadata */ }
 }
 
 export async function fileFromRecentProject(record) {
@@ -340,7 +361,8 @@ async function writeAutosave(doc) {
       get.onsuccess = () => {
         const history = Array.isArray(get.result) ? get.result : [];
         history.push({ when: Date.now(), name: doc.name, width: doc.width, height: doc.height, thumbnail, files });
-        store.put(history.slice(-3), 'history');
+        const keep = Math.max(1, Math.min(10, parseInt(localStorage.getItem('deadpixel.recoveryCount') || '3')));
+        store.put(history.slice(-keep), 'history');
         store.delete('last');
       };
       tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);

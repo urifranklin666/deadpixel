@@ -1,6 +1,6 @@
 # DEADPIXEL
 
-DEADPIXEL is a local-first raster editor for the browser and Windows. It includes layers, selections, brushes, text, filters, multi-snapshot crash recovery, offline PWA support, native Save/Save As where supported, and a nondestructive Signal Rack with painted masks and worker-backed document or per-layer processing.
+DEADPIXEL is a local-first raster editor for the browser and Windows. It includes layers, selections, brushes, text, filters, configurable multi-snapshot crash recovery, offline PWA support, native Save/Save As where supported, managed recent projects, and a nondestructive Signal Rack with painted masks, module-stage caching, and worker-backed document or per-layer processing.
 
 ## Development
 

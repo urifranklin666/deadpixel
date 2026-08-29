@@ -170,6 +170,40 @@ test('painted Signal Rack masks survive a DPX round trip', async ({ page }) => {
   expect(result.maskId).toMatch(/^ML/);
 });
 
+test('Signal Rack reuses unchanged module stages', async ({ page }) => {
+  await page.getByRole('button', { name: /MIDNIGHT BROADCAST/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel, filters = await import('/js/filters.js');
+    app.doc.effects = [
+      { id: 'cached-a', filter: 'invert', params: {} },
+      { id: 'cached-b', filter: 'brightness-contrast', params: { brightness: 5, contrast: 2 } },
+    ];
+    app.doc.changed(); app.doc.compose();
+    const before = filters.processingStats.stageHits;
+    app.doc.effects[1].params.brightness = 12; app.doc.changed(); app.doc.compose();
+    return { reused: filters.processingStats.stageHits - before, bytes: filters.processingStats.cacheBytes };
+  });
+  expect(result.reused).toBeGreaterThanOrEqual(1);
+  expect(result.bytes).toBeGreaterThan(0);
+});
+
+test('local project settings and update controls are exposed', async ({ page }) => {
+  await page.getByText('HELP', { exact: true }).click();
+  await expect(page.getByText('Local Project Settings…', { exact: true })).toBeVisible();
+  await expect(page.getByText('Check for Updates…', { exact: true })).toBeVisible();
+});
+
+test('painted masks can be edited directly over the document view', async ({ page }) => {
+  await page.getByRole('button', { name: /MIDNIGHT BROADCAST/ }).click();
+  const painted = await page.evaluate(() => {
+    const app = window.deadpixel, id = app.doc.createSignalMask(false), alpha = app.doc.signalMasks.get(id); alpha.fill(0);
+    app.beginMaskPainting(id); app.brush.size = 30; app._dabMask({ x: 20, y: 20 }, false); app._commitMaskPaint(true);
+    return { value: alpha[20 * app.doc.width + 20], active: !!app.maskPaint };
+  });
+  expect(painted.value).toBeGreaterThan(0);
+  expect(painted.active).toBe(false);
+});
+
 test('editor shell fits desktop and compact viewports', async ({ page }) => {
   for (const size of [{ width: 1440, height: 900 }, { width: 900, height: 600 }]) {
     await page.setViewportSize(size);

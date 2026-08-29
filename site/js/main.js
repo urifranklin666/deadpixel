@@ -3,7 +3,7 @@
 import { Doc, Layer, TextLayer, clamp, makeCanvas } from './engine.js';
 import { TOOLS, toolById, transformTool } from './tools.js';
 import * as UI from './ui.js';
-import { openDpx, loadImageFile, docFromImage, autosave, loadAutosaves, clearAutosave, deleteAutosave, docFromFiles, setAutosaveReporter, rememberRecentProject, listRecentProjects, fileFromRecentProject } from './io.js';
+import { openDpx, loadImageFile, docFromImage, autosave, loadAutosaves, clearAutosave, deleteAutosave, docFromFiles, setAutosaveReporter, rememberRecentProject, listRecentProjects, fileFromRecentProject, updateRecentProject, forgetRecentProject } from './io.js';
 import { processSignalStack, processSignalStackAsync } from './filters.js';
 
 const $ = (s) => document.querySelector(s);
@@ -45,8 +45,8 @@ class App {
   /* ------------------------------ doc ------------------------------ */
   attachDoc(doc) {
     this.doc = doc;
-    doc.effectProcessor = (canvas, effects, seed) => processSignalStack(canvas, doc.effectsWithMasks(effects), seed);
-    doc.effectProcessorAsync = (canvas, effects, seed) => processSignalStackAsync(canvas, doc.effectsWithMasks(effects), seed);
+    doc.effectProcessor = (canvas, effects, seed, cache) => processSignalStack(canvas, doc.effectsWithMasks(effects), seed, cache);
+    doc.effectProcessorAsync = (canvas, effects, seed, cache) => processSignalStackAsync(canvas, doc.effectsWithMasks(effects), seed, cache);
     let processingJobs = 0;
     doc.onProcessingChange = (active) => {
       processingJobs = Math.max(0, processingJobs + (active ? 1 : -1));
@@ -201,6 +201,9 @@ class App {
     ctx.translate(panX, panY);
     ctx.scale(zoom, zoom);
     ctx.drawImage(D.composePreview(() => this.requestRender()), 0, 0);
+    if (this.maskPaint?.canvas) {
+      ctx.save(); ctx.globalAlpha = .42; ctx.globalCompositeOperation = 'screen'; ctx.drawImage(this.maskPaint.canvas, 0, 0); ctx.restore();
+    }
     // live stroke preview
     const stroke = this.tool?.previewStroke?.();
     if (stroke && stroke.layer === D.activeLayer) {
@@ -541,6 +544,29 @@ class App {
   }
 
   /* ------------------------------ input wiring ------------------------------ */
+  beginMaskPainting(maskId) {
+    const alpha = this.doc?.signalMasks.get(maskId); if (!alpha) return;
+    const canvas = makeCanvas(this.doc.width, this.doc.height), ctx = canvas.getContext('2d', { willReadFrequently: true }), image = ctx.createImageData(this.doc.width, this.doc.height);
+    for (let i = 0; i < alpha.length; i++) image.data.set([255, 34, 51, alpha[i]], i * 4);
+    ctx.putImageData(image, 0, 0); this.maskPaint = { maskId, alpha, canvas, ctx, drawing: false };
+    this.toast('PAINT MASK ON IMAGE · ALT ERASES · [ ] SIZE · ENTER TO FINISH'); this.requestRender();
+  }
+  _dabMask(pt, erase = false) {
+    const session = this.maskPaint; if (!session) return;
+    const radius = Math.max(1, this.brush.size / 2), gradient = session.ctx.createRadialGradient(pt.x, pt.y, radius * .6, pt.x, pt.y, radius);
+    gradient.addColorStop(0, erase ? 'rgba(255,34,51,1)' : 'rgba(255,34,51,1)'); gradient.addColorStop(1, 'rgba(255,34,51,0)');
+    session.ctx.save(); session.ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over'; session.ctx.fillStyle = gradient; session.ctx.beginPath(); session.ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2); session.ctx.fill(); session.ctx.restore();
+    this.requestRender();
+  }
+  _commitMaskPaint(finish = false) {
+    const session = this.maskPaint; if (!session) return;
+    const rgba = session.ctx.getImageData(0, 0, this.doc.width, this.doc.height).data;
+    for (let i = 0; i < session.alpha.length; i++) session.alpha[i] = rgba[i * 4 + 3];
+    this.doc.maskRevision++; this.doc.changed();
+    if (finish) { this.maskPaint = null; this.toast('PAINT MASK APPLIED'); }
+    this.requestRender();
+  }
+
   bindInput() {
     const vc = this.viewCanvas;
     let panDrag = null;
@@ -580,6 +606,7 @@ class App {
       }
       if (e.button === 2) return;
       if (!this.doc) return;
+      if (this.maskPaint) { this.maskPaint.drawing = true; this._dabMask(pt, e.altKey); return; }
       this.tool?.onDown?.(this, pt, e);
       this.requestRender();
     });
@@ -613,6 +640,7 @@ class App {
         return;
       }
       if (this.doc) {
+        if (this.maskPaint?.drawing) { this._dabMask(pt, e.altKey); return; }
         // coalesced events give smoother strokes
         const events = e.getCoalescedEvents?.() || [e];
         for (const ce of events) {
@@ -637,6 +665,7 @@ class App {
       const r = vc.getBoundingClientRect();
       const sx = e.clientX - r.left, sy = e.clientY - r.top;
       const [x, y] = this.screenToDoc(sx, sy);
+      if (this.maskPaint) { this.maskPaint.drawing = false; this._commitMaskPaint(false); return; }
       this.tool?.onUp?.(this, { x, y, sx, sy, pressure: e.pressure || .5 }, e);
       this.requestRender();
     });
@@ -685,6 +714,7 @@ class App {
     document.addEventListener('keydown', (e) => {
       if (e.target.matches('input,textarea,select,[contenteditable]')) return;
       if (e.code === 'Space' && !e.repeat) { this.spaceDown = true; this.viewport.classList.add('tool-hand'); }
+      if (this.maskPaint && (e.key === 'Enter' || e.key === 'Escape')) { e.preventDefault(); this._commitMaskPaint(true); return; }
 
       // tool-level key handling first (Enter/Esc for crop, lasso, transform)
       if (this.tool?.onKey?.(this, e)) { e.preventDefault(); return; }
@@ -836,6 +866,11 @@ async function boot() {
   }
 
   async function afterBoot() {
+    const lastUpdateCheck = parseInt(localStorage.getItem('deadpixel.lastUpdateCheck') || '0');
+    if (localStorage.getItem('deadpixel.updateChecks') !== 'off' && Date.now() - lastUpdateCheck > 86400000) {
+      localStorage.setItem('deadpixel.lastUpdateCheck', String(Date.now()));
+      setTimeout(() => UI.checkForUpdates(true), 2000);
+    }
     // crash recovery
     const recoveries = await loadAutosaves();
     if (recoveries.length) {
@@ -878,8 +913,14 @@ async function boot() {
         recentHost.hidden = false;
         recentHost.replaceChildren(el2('div', 'launch-kicker', 'RECENT TRANSMISSIONS'));
         for (const record of recents) {
-          const button = el2('button', null, null); button.type = 'button'; button.textContent = record.name;
-          button.addEventListener('click', () => app.openRecent(record)); recentHost.appendChild(button);
+          const item = el2('div', 'recent-project'), button = el2('button', 'recent-open', null), pin = el2('button', 'recent-pin', record.pinned ? '★' : '☆'), forget = el2('button', 'recent-forget', '×');
+          button.type = pin.type = forget.type = 'button'; button.textContent = record.alias || record.name;
+          button.addEventListener('click', () => app.openRecent(record));
+          button.title = 'double-click to rename this recent entry';
+          button.addEventListener('dblclick', async e => { e.preventDefault(); e.stopPropagation(); const alias = prompt('RECENT PROJECT LABEL', record.alias || record.name); if (alias?.trim()) { record.alias = alias.trim(); await updateRecentProject(record, { alias: record.alias }); button.textContent = record.alias; } });
+          pin.title = 'pin recent project'; pin.addEventListener('click', async () => { await updateRecentProject(record, { pinned: !record.pinned }); record.pinned = !record.pinned; pin.textContent = record.pinned ? '★' : '☆'; });
+          forget.title = 'forget recent project'; forget.addEventListener('click', async () => { await forgetRecentProject(record); item.remove(); });
+          item.append(button, pin, forget); recentHost.appendChild(item);
         }
       }
     }
@@ -901,7 +942,7 @@ async function boot() {
     status.classList.toggle('err', state === 'error');
     if (state !== 'saving') app._autosaveStatusTimer = setTimeout(() => { status.hidden = true; }, 2500);
   });
-  setInterval(() => { if (app.doc?.dirty && !app.doc.previewing) autosave(app.doc); }, 45000);
+  setInterval(() => { if (localStorage.getItem('deadpixel.autosave') !== 'off' && app.doc?.dirty && !app.doc.previewing) autosave(app.doc); }, 45000);
 
   // preload a few showcase fonts so the picker doesn't flash
   ['VT323', 'Big Shoulders'].forEach(f => app.ensureFont(f));
