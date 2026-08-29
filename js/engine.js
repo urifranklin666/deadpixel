@@ -312,6 +312,7 @@ export class Doc extends EventTarget {
     this.activeIndex = 0;
     this.selection = null;
     this.effects = [];
+    this.signalMasks = new Map();
     this.signalSeed = (Math.random() * 0xffffffff) >>> 0;
     this.effectProcessor = null;
     this.effectProcessorAsync = null;
@@ -334,6 +335,22 @@ export class Doc extends EventTarget {
   }
   get activeLayer() { return this.layers[this.activeIndex] || null; }
 
+  createSignalMask(fromSelection = true) {
+    const id = 'M' + uid();
+    const data = new Uint8ClampedArray(this.width * this.height);
+    if (fromSelection && this.selection) {
+      const pixels = this.selection.mctx.getImageData(0, 0, this.width, this.height).data;
+      for (let i = 0; i < data.length; i++) data[i] = pixels[i * 4 + 3];
+    } else data.fill(255);
+    this.signalMasks.set(id, data);
+    return id;
+  }
+
+  effectsWithMasks(effects) {
+    return (effects || []).map(effect => effect.mask === 'raster' && this.signalMasks.has(effect.maskId)
+      ? { ...effect, maskPixels: this.signalMasks.get(effect.maskId) } : effect);
+  }
+
   changed(structural = false) {
     this.dirty = true;
     this._compoDirty = true;
@@ -342,7 +359,7 @@ export class Doc extends EventTarget {
     this.dispatchEvent(new CustomEvent('change', { detail: { structural } }));
   }
 
-  _buildCompositeBase() {
+  _buildCompositeBase(preview = false, onReady = null) {
     if (this._compoDirty) {
       // Also invalidates jobs when callers toggle preview-only state directly.
       this._compoGeneration++;
@@ -357,11 +374,34 @@ export class Doc extends EventTarget {
         if (!l._effectsBypassed && l.effects?.length && this.effectProcessor) {
           const cacheKey = l.revision + ':' + l.signalSeed + ':' + JSON.stringify(l.effects);
           if (l._effectCacheKey !== cacheKey) {
-            l._effectCache = copyCanvas(l.canvas);
-            this.effectProcessor(l._effectCache, l.effects, l.signalSeed);
-            l._effectCacheKey = cacheKey;
+            if (preview && this.effectProcessorAsync) {
+              if (l._effectPendingKey !== cacheKey) {
+                if (l._effectPending) this.onProcessingChange?.(false);
+                const token = {}; l._effectPending = token; l._effectPendingKey = cacheKey;
+                this.onProcessingChange?.(true);
+                const input = copyCanvas(l.canvas);
+                this.effectProcessorAsync(input, l.effects, l.signalSeed).then((pixels) => {
+                  if (l._effectPending !== token) return;
+                  l._effectPending = null; l._effectPendingKey = null; this.onProcessingChange?.(false);
+                  if (l.revision + ':' + l.signalSeed + ':' + JSON.stringify(l.effects) !== cacheKey) return;
+                  const output = makeCanvas(this.width, this.height), image = output.getContext('2d').createImageData(this.width, this.height);
+                  image.data.set(pixels); output.getContext('2d').putImageData(image, 0, 0);
+                  l._effectCache = output; l._effectCacheKey = cacheKey;
+                  this._compoDirty = true; onReady?.();
+                }).catch(() => {
+                  if (l._effectPending !== token) return;
+                  l._effectPending = null; l._effectPendingKey = null; this.onProcessingChange?.(false);
+                });
+              }
+            } else {
+              if (l._effectPending) this.onProcessingChange?.(false);
+              l._effectPending = null; l._effectPendingKey = null;
+              l._effectCache = copyCanvas(l.canvas);
+              this.effectProcessor(l._effectCache, l.effects, l.signalSeed);
+              l._effectCacheKey = cacheKey;
+            }
           }
-          ctx.drawImage(l._effectCache, 0, 0);
+          ctx.drawImage(l._effectCacheKey === cacheKey ? l._effectCache : l.canvas, 0, 0);
         } else l.draw(ctx);
       }
       ctx.globalAlpha = 1;
@@ -383,7 +423,7 @@ export class Doc extends EventTarget {
   }
 
   composePreview(onReady) {
-    this._buildCompositeBase();
+    this._buildCompositeBase(true, onReady);
     if (this._compoEffectsApplied || this._compoPending) return this._compo;
     if (!this.effectProcessorAsync) return this.compose();
     const token = { generation: this._compoGeneration };
@@ -578,6 +618,7 @@ export class Doc extends EventTarget {
     return {
       w: this.width, h: this.height,
       layers: this.layers.slice(),
+      masks: new Map([...this.signalMasks].map(([id, data]) => [id, new Uint8ClampedArray(data)])),
       idx: this.activeIndex,
     };
   }
@@ -586,6 +627,7 @@ export class Doc extends EventTarget {
     this._compo = makeCanvas(s.w, s.h);
     this._compoCtx = this._compo.getContext('2d', { willReadFrequently: true });
     this.layers = s.layers.slice();
+    this.signalMasks = new Map([...s.masks].map(([id, data]) => [id, new Uint8ClampedArray(data)]));
     this.activeIndex = s.idx;
     this.selection = null;
     this.changed(true);
@@ -597,9 +639,23 @@ export class Doc extends EventTarget {
     this.history.push(label, () => this._geoRestore(before), () => this._geoRestore(after));
     this._geoRestore(after); // apply canonical state (also resets compose buffer)
   }
+  _transformSignalMasks(w, h, draw) {
+    const transformed = new Map();
+    for (const [id, alpha] of this.signalMasks) {
+      const src = makeCanvas(this.width, this.height), sctx = src.getContext('2d'), image = sctx.createImageData(this.width, this.height);
+      for (let i = 0; i < alpha.length; i++) image.data.set([255, 255, 255, alpha[i]], i * 4);
+      sctx.putImageData(image, 0, 0);
+      const dst = makeCanvas(w, h), dctx = dst.getContext('2d', { willReadFrequently: true }); draw(dctx, src, w, h);
+      const rgba = dctx.getImageData(0, 0, w, h).data, next = new Uint8ClampedArray(w * h);
+      for (let i = 0; i < next.length; i++) next[i] = rgba[i * 4 + 3];
+      transformed.set(id, next);
+    }
+    this.signalMasks = transformed;
+  }
   resizeImage(w, h, smooth = true) {
     this._geo('Image size', () => {
       const sx = w / this.width, sy = h / this.height;
+      this._transformSignalMasks(w, h, (ctx, src) => { ctx.imageSmoothingEnabled = smooth; ctx.drawImage(src, 0, 0, w, h); });
       this.layers = this.layers.map(l => {
         if (l.type === 'text') {
           const nl = l.clone();
@@ -624,6 +680,7 @@ export class Doc extends EventTarget {
       const ay = anchor.includes('top') ? 0 : anchor.includes('bottom') ? 1 : .5;
       const dx = Math.round((w - this.width) * ax);
       const dy = Math.round((h - this.height) * ay);
+      this._transformSignalMasks(w, h, (ctx, src) => ctx.drawImage(src, dx, dy));
       this.layers = this.layers.map(l => {
         const nl = l.clone(); nl.name = l.name;
         if (nl.type === 'text') {
@@ -640,6 +697,7 @@ export class Doc extends EventTarget {
   crop(rect) {
     const { x, y, w, h } = rect;
     this._geo('Crop', () => {
+      this._transformSignalMasks(w, h, (ctx, src) => ctx.drawImage(src, -x, -y));
       this.layers = this.layers.map(l => {
         const nl = l.clone(); nl.name = l.name;
         if (nl.type === 'text') {
@@ -656,6 +714,7 @@ export class Doc extends EventTarget {
   rotateDoc(deg) { // 90, 180, 270
     this._geo('Rotate canvas', () => {
       const [w, h] = deg === 180 ? [this.width, this.height] : [this.height, this.width];
+      this._transformSignalMasks(w, h, (ctx, src) => { ctx.translate(w / 2, h / 2); ctx.rotate(deg * Math.PI / 180); ctx.drawImage(src, -src.width / 2, -src.height / 2); });
       this.layers = this.layers.map(l => {
         const src = l.type === 'text' ? l.rasterize() : l.clone();
         src.name = l.name;
@@ -675,6 +734,7 @@ export class Doc extends EventTarget {
   }
   flipDoc(horizontal) {
     this._geo(horizontal ? 'Flip horizontal' : 'Flip vertical', () => {
+      this._transformSignalMasks(this.width, this.height, (ctx, src, w, h) => { if (horizontal) { ctx.scale(-1, 1); ctx.drawImage(src, -w, 0); } else { ctx.scale(1, -1); ctx.drawImage(src, 0, -h); } });
       this.layers = this.layers.map(l => {
         const nl = l.type === 'text' ? l.rasterize() : l.clone();
         nl.name = l.name;

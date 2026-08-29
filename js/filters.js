@@ -528,6 +528,7 @@ export function processSignalPixels(data, w, h, effects, seed = 0) {
         let mask = 1;
         if (effect.mask === 'luma') mask = (before[p] * .2126 + before[p + 1] * .7152 + before[p + 2] * .0722) / 255;
         else if (effect.mask === 'alpha') mask = before[p + 3] / 255;
+        else if (effect.mask === 'raster' && effect.maskPixels) mask = effect.maskPixels[p >> 2] / 255;
         if (effect.maskInvert) mask = 1 - mask;
         const amount = mix * mask;
         for (let c = 0; c < 4; c++) pixels[p + c] = before[p + c] + (pixels[p + c] - before[p + c]) * amount;
@@ -538,7 +539,6 @@ export function processSignalPixels(data, w, h, effects, seed = 0) {
 }
 
 export function processSignalPixelsAsync(data, w, h, effects, seed = 0) {
-  cancelProcessingJobs('signal');
   const worker = getProcessingWorker();
   const pixels = new Uint8ClampedArray(data);
   if (!worker) return Promise.resolve(processSignalPixels(pixels, w, h, effects, seed));

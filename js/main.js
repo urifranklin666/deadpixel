@@ -3,7 +3,7 @@
 import { Doc, Layer, TextLayer, clamp, makeCanvas } from './engine.js';
 import { TOOLS, toolById, transformTool } from './tools.js';
 import * as UI from './ui.js';
-import { openDpx, loadImageFile, docFromImage, autosave, loadAutosave, clearAutosave, docFromFiles, setAutosaveReporter } from './io.js';
+import { openDpx, loadImageFile, docFromImage, autosave, loadAutosaves, clearAutosave, deleteAutosave, docFromFiles, setAutosaveReporter, rememberRecentProject, listRecentProjects, fileFromRecentProject } from './io.js';
 import { processSignalStack, processSignalStackAsync } from './filters.js';
 
 const $ = (s) => document.querySelector(s);
@@ -45,12 +45,14 @@ class App {
   /* ------------------------------ doc ------------------------------ */
   attachDoc(doc) {
     this.doc = doc;
-    doc.effectProcessor = processSignalStack;
-    doc.effectProcessorAsync = processSignalStackAsync;
+    doc.effectProcessor = (canvas, effects, seed) => processSignalStack(canvas, doc.effectsWithMasks(effects), seed);
+    doc.effectProcessorAsync = (canvas, effects, seed) => processSignalStackAsync(canvas, doc.effectsWithMasks(effects), seed);
+    let processingJobs = 0;
     doc.onProcessingChange = (active) => {
+      processingJobs = Math.max(0, processingJobs + (active ? 1 : -1));
       const indicator = $('#st-processing');
-      indicator.hidden = !active;
-      indicator.classList.toggle('on', active);
+      indicator.hidden = processingJobs === 0;
+      indicator.classList.toggle('on', processingJobs > 0);
     };
     if (this.pendingRecipe) {
       doc.effects = this.pendingRecipe.effects;
@@ -474,7 +476,21 @@ class App {
   }
 
   /* ------------------------------ file pickers / import ------------------------------ */
-  openFilePicker(asLayer) {
+  async openFilePicker(asLayer) {
+    if (!asLayer && 'showOpenFilePicker' in globalThis) {
+      try {
+        const [handle] = await showOpenFilePicker({
+          multiple: false,
+          types: [
+            { description: 'DEADPIXEL project', accept: { 'application/zip': ['.dpx'] } },
+            { description: 'Images', accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg'] } },
+          ],
+        });
+        const file = await handle.getFile();
+        await this.openFile(file, false, handle);
+      } catch (error) { if (error?.name !== 'AbortError') this.toast('COULD NOT OPEN FILE', true); }
+      return;
+    }
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.dpx,image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml';
@@ -483,12 +499,14 @@ class App {
     });
     input.click();
   }
-  async openFile(file, asLayer = false) {
+  async openFile(file, asLayer = false, handle = null) {
     try {
       if (file.name.toLowerCase().endsWith('.dpx')) {
         const doc = await openDpx(await file.arrayBuffer());
         doc.name = file.name.replace(/\.dpx$/i, '').toUpperCase();
+        doc._fileHandle = handle;
         this.attachDoc(doc);
+        if (handle) await rememberRecentProject(handle);
         this.toast('PROJECT LOADED: ' + doc.name);
         return;
       }
@@ -503,12 +521,22 @@ class App {
         this.toast('IMPORTED AS LAYER');
       } else {
         const doc = docFromImage(img, file.name.replace(/\.[^.]+$/, '').toUpperCase());
+        doc._fileHandle = handle;
         this.attachDoc(doc);
         this.toast('IMAGE OPENED ' + doc.width + '×' + doc.height);
       }
     } catch (e) {
       console.error(e);
       this.toast('COULD NOT OPEN FILE', true);
+    }
+  }
+
+  async openRecent(record) {
+    try {
+      const file = await fileFromRecentProject(record);
+      await this.openFile(file, false, record.handle);
+    } catch (error) {
+      this.toast(error?.name === 'NotAllowedError' ? 'FILE ACCESS DENIED' : 'RECENT PROJECT UNAVAILABLE', true);
     }
   }
 
@@ -809,28 +837,52 @@ async function boot() {
 
   async function afterBoot() {
     // crash recovery
-    const saved = await loadAutosave();
-    if (saved && saved.files) {
-      const age = Math.round((Date.now() - saved.when) / 60000);
+    const recoveries = await loadAutosaves();
+    if (recoveries.length) {
       const res = await UI.dialog('RESURRECTION', (body) => {
-        body.appendChild(el2('div', 'dlg-note',
-          `An unsaved session was found on this machine: <b>${saved.name}</b> (${age < 1 ? 'moments' : age + ' min'} ago). Recover it?`));
+        const list = el2('div', 'recovery-list'); let selected = recoveries.length - 1;
+        recoveries.forEach((saved, index) => {
+          const card = el2('button', 'recovery-card' + (index === selected ? ' selected' : ''));
+          card.type = 'button';
+          if (saved.thumbnail) {
+            const img = new Image(); img.src = URL.createObjectURL(new Blob([saved.thumbnail], { type: 'image/png' })); card.appendChild(img);
+          }
+          const age = Math.round((Date.now() - saved.when) / 60000);
+          card.appendChild(el2('span', null, `<b>${saved.name}</b><small>${saved.width || '?'}×${saved.height || '?'} · ${age < 1 ? 'moments' : age + ' min'} ago</small>`));
+          card.addEventListener('click', () => { selected = index; list.querySelectorAll('.recovery-card').forEach((x, i) => x.classList.toggle('selected', i === index)); });
+          const del = el2('i', null, '×'); del.addEventListener('click', async e => { e.stopPropagation(); await deleteAutosave(saved.when); card.remove(); }); card.appendChild(del);
+          list.appendChild(card);
+        });
+        body.appendChild(list); return { selected: () => recoveries[selected] };
       }, [
         { label: 'Discard', value: () => 'discard' },
-        { label: 'Recover', primary: true, value: () => 'recover' },
+        { label: 'Recover', primary: true, value: c => c.selected() },
       ]);
-      if (res === 'recover') {
+      if (res && res !== 'discard') {
         try {
-          const doc = await docFromFiles(saved.files);
-          doc.name = saved.name;
+          const doc = await docFromFiles(res.files);
+          doc.name = res.name;
           app.attachDoc(doc);
           app.toast('SESSION RESURRECTED');
+          await clearAutosave();
           return;
         } catch (e) { console.error(e); }
       }
       await clearAutosave();
     }
-    if (!app.doc) document.querySelector('#launch-bay')?.classList.remove('gone');
+    if (!app.doc) {
+      document.querySelector('#launch-bay')?.classList.remove('gone');
+      const recentHost = $('#launch-recents');
+      const recents = await listRecentProjects();
+      if (recents.length) {
+        recentHost.hidden = false;
+        recentHost.replaceChildren(el2('div', 'launch-kicker', 'RECENT TRANSMISSIONS'));
+        for (const record of recents) {
+          const button = el2('button', null, null); button.type = 'button'; button.textContent = record.name;
+          button.addEventListener('click', () => app.openRecent(record)); recentHost.appendChild(button);
+        }
+      }
+    }
   }
   function el2(tag, cls, html) {
     const e = document.createElement(tag);
