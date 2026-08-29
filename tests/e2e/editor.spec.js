@@ -128,7 +128,7 @@ test('autosave rotates recovery records and restores the newest one', async ({ p
       await io.autosave(window.deadpixel.doc);
     }
     const db = await new Promise((resolve, reject) => {
-      const req = indexedDB.open('deadpixel', 1); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
+      const req = indexedDB.open('deadpixel', 2); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
     });
     const count = await new Promise(resolve => {
       const req = db.transaction('autosave').objectStore('autosave').get('history');
@@ -138,6 +138,36 @@ test('autosave rotates recovery records and restores the newest one', async ({ p
     return { latest: (await io.loadAutosave()).name, count };
   });
   expect(recovered).toEqual({ latest: 'FOUR', count: 3 });
+});
+
+test('native project save writes through a file handle', async ({ page }) => {
+  await page.getByRole('button', { name: /MIDNIGHT BROADCAST/ }).click();
+  const result = await page.evaluate(async () => {
+    const writes = [];
+    const handle = {
+      name: 'native.dpx',
+      createWritable: async () => ({ write: async blob => writes.push(blob.size), close: async () => writes.push('closed') }),
+    };
+    const io = await import('/js/io.js');
+    const saved = await io.saveProjectFile(window.deadpixel.doc, handle);
+    return { native: saved.native, wrote: writes[0] > 0, closed: writes[1] };
+  });
+  expect(result).toEqual({ native: true, wrote: true, closed: 'closed' });
+});
+
+test('painted Signal Rack masks survive a DPX round trip', async ({ page }) => {
+  await page.getByRole('button', { name: /MIDNIGHT BROADCAST/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel, io = await import('/js/io.js');
+    const id = app.doc.createSignalMask(false), mask = app.doc.signalMasks.get(id);
+    mask.fill(0); mask[0] = 255; mask[1] = 127;
+    app.doc.effects = [{ id: 'painted', filter: 'invert', params: {}, mask: 'raster', maskId: id }];
+    const restored = await io.docFromFiles(await io.serializeDoc(app.doc));
+    const restoredMask = restored.signalMasks.get(id);
+    return { count: restored.signalMasks.size, first: restoredMask[0], second: restoredMask[1], maskId: restored.effects[0].maskId };
+  });
+  expect(result).toEqual(expect.objectContaining({ count: 1, first: 255, second: 127 }));
+  expect(result.maskId).toMatch(/^ML/);
 });
 
 test('editor shell fits desktop and compact viewports', async ({ page }) => {

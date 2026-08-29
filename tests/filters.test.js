@@ -40,3 +40,9 @@ test('Signal Rack alpha mask preserves fully transparent pixels', () => {
   const output = processSignalPixels(pixels, 2, 2, [{ id: 'x', filter: 'invert', params: {}, mask: 'alpha' }], 1);
   assert.deepEqual([...output.slice(0, 4)], [...original.slice(0, 4)]);
 });
+
+test('Signal Rack painted mask applies an effect pixel by pixel', () => {
+  const pixels = new Uint8ClampedArray([10, 20, 30, 255, 40, 50, 60, 255]);
+  const output = processSignalPixels(pixels, 2, 1, [{ id: 'paint', filter: 'invert', params: {}, mask: 'raster', maskPixels: new Uint8ClampedArray([255, 0]) }], 1);
+  assert.deepEqual([...output], [245, 235, 225, 255, 40, 50, 60, 255]);
+});

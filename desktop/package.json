@@ -1,7 +1,7 @@
 {
   "name": "deadpixel",
   "productName": "DeadPixel",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "DEADPIXEL — raster surgery suite. A deadplug.digital transmission.",
   "author": "deadplug.digital",
   "main": "main.js",

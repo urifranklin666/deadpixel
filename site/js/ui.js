@@ -3,8 +3,8 @@
 import { BLEND_MODES, Selection, hexToRgb, rgbToHex, hsvToRgb, rgbToHsv, clamp, makeCanvas } from './engine.js';
 import { TOOLS, toolById, iconSvg } from './tools.js';
 import { BRUSH_PRESETS, renderTip, STAMPS, renderStamp } from './brushes.js';
-import { FILTERS, filterById, defaultParams, applyFilterToLayer, applyFilterToLayerAsync, processFilterPixelsAsync, BUILTIN_ACTIONS, seeded } from './filters.js';
-import { saveDpx, openDpx, exportDoc, downloadBlob, loadImageFile, docFromImage } from './io.js';
+import { FILTERS, filterById, defaultParams, applyFilterToLayer, applyFilterToLayerAsync, processFilterPixelsAsync, BUILTIN_ACTIONS, seeded, processingStats } from './filters.js';
+import { saveProjectFile, openDpx, exportDoc, downloadBlob, loadImageFile, docFromImage } from './io.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const el = (tag, cls, html) => {
@@ -294,7 +294,7 @@ async function exportDialog(app, format) {
 function aboutDialog() {
   dialog('ABOUT', (body) => {
     body.appendChild(el('div', 'about-hero', 'DEAD<em>PIXEL</em>'));
-    body.appendChild(el('div', 'about-osd', 'RASTER SURGERY SUITE · v1.5'));
+    body.appendChild(el('div', 'about-osd', 'RASTER SURGERY SUITE · v1.6'));
     body.appendChild(el('div', 'dlg-note',
       'A full-blooded image editor running entirely in your browser. Nothing you make here ever leaves your machine — no uploads, no accounts, no telemetry. Just you and the pixels.<br><br>' +
       'A transmission from <a href="https://deadplug.digital" target="_blank" rel="noopener">deadplug.digital</a> · CH.404'));
@@ -348,6 +348,28 @@ function windowsDialog(app) {
   }, [{ label: 'Close', primary: true, value: () => true }]);
 }
 
+function diagnostics(app) {
+  const D = app.doc;
+  return {
+    generatedAt: new Date().toISOString(), app: 'DEADPIXEL', version: '1.6.0',
+    runtime: { userAgent: navigator.userAgent, language: navigator.language, online: navigator.onLine, deviceMemory: navigator.deviceMemory || null, hardwareConcurrency: navigator.hardwareConcurrency || null },
+    capabilities: { workers: typeof Worker !== 'undefined', fileSystemAccess: 'showOpenFilePicker' in globalThis, offscreenCanvas: typeof OffscreenCanvas !== 'undefined', webGL2: !!document.createElement('canvas').getContext('webgl2') },
+    document: D ? { width: D.width, height: D.height, layers: D.layers.length, documentModules: D.effects.length, layerModules: D.layers.reduce((n, layer) => n + (layer.effects?.length || 0), 0), masks: D.signalMasks.size, historyEntries: D.history.entries.length, historyBytes: D.history.bytes } : null,
+    processing: { ...processingStats },
+  };
+}
+
+function exportDiagnostics(app) {
+  downloadBlob(new Blob([JSON.stringify(diagnostics(app), null, 2)], { type: 'application/json' }), 'deadpixel-diagnostics.json');
+  toast('DIAGNOSTICS EXPORTED · NO PIXELS OR FILENAMES INCLUDED');
+}
+
+function reportIssue(app) {
+  const report = diagnostics(app);
+  const body = `Describe what happened:\n\n\nDiagnostics (no image pixels or filenames):\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\``;
+  window.open('https://github.com/urifranklin666/deadpixel/issues/new?title=' + encodeURIComponent('[Bug] ') + '&body=' + encodeURIComponent(body), '_blank', 'noopener');
+}
+
 /* ============================ commands ============================ */
 export function buildCommands(app) {
   const D = () => app.doc;
@@ -356,11 +378,18 @@ export function buildCommands(app) {
     'file.new': { label: 'New…', key: 'Ctrl+Alt+N', run: () => newDocDialog(app) },
     'file.open': { label: 'Open… (.dpx / image)', key: 'Ctrl+O', run: () => app.openFilePicker(false) },
     'file.place': { label: 'Import As Layer…', key: null, run: needDoc(() => app.openFilePicker(true)) },
-    'file.save': { label: 'Save Project (.dpx)', key: 'Ctrl+S', run: needDoc(async () => {
-      const blob = await saveDpx(D());
-      downloadBlob(blob, D().name.toLowerCase().replace(/[^a-z0-9_-]+/g, '-') + '.dpx');
-      D().dirty = false; app.refreshTitle();
-      toast('PROJECT SAVED — KEEP IT SOMEWHERE SAFE');
+    'file.save': { label: 'Save Project', key: 'Ctrl+S', run: needDoc(async () => {
+      try {
+        const result = await saveProjectFile(D(), D()._fileHandle);
+        D()._fileHandle = result.handle; D().dirty = false; app.refreshTitle();
+        toast(result.native ? 'PROJECT SAVED' : 'PROJECT DOWNLOADED — KEEP IT SOMEWHERE SAFE');
+      } catch (error) { if (error?.name !== 'AbortError') toast('PROJECT SAVE FAILED', true); }
+    })},
+    'file.saveas': { label: 'Save Project As…', key: 'Ctrl+Alt+S', run: needDoc(async () => {
+      try {
+        const result = await saveProjectFile(D(), null, true);
+        D()._fileHandle = result.handle; D().dirty = false; app.refreshTitle(); toast('PROJECT SAVED AS ' + (result.handle?.name || 'DOWNLOAD'));
+      } catch (error) { if (error?.name !== 'AbortError') toast('PROJECT SAVE FAILED', true); }
     })},
     'file.export.png': { label: 'Export PNG…', key: 'Ctrl+Shift+E', run: needDoc(() => exportDialog(app, 'png')) },
     'file.export.jpeg': { label: 'Export JPEG…', key: null, run: needDoc(() => exportDialog(app, 'jpeg')) },
@@ -412,6 +441,8 @@ export function buildCommands(app) {
     }},
 
     'help.shortcuts': { label: 'Keyboard Shortcuts', key: null, run: () => shortcutsDialog() },
+    'help.diagnostics': { label: 'Export Diagnostics…', key: null, run: () => exportDiagnostics(app) },
+    'help.report': { label: 'Report Issue… ↗', key: null, run: () => reportIssue(app) },
     'help.about': { label: 'About DEADPIXEL', key: null, run: () => aboutDialog() },
     'help.home': { label: 'deadplug.digital ↗', key: null, run: () => window.open('https://deadplug.digital', '_blank') },
   };
@@ -423,7 +454,7 @@ export function buildCommands(app) {
 }
 
 const MENU_LAYOUT = [
-  ['FILE', ['file.new', 'file.open', 'file.place', null, 'file.save', null, 'file.export.png', 'file.export.jpeg', 'file.export.webp', null, 'file.windows']],
+  ['FILE', ['file.new', 'file.open', 'file.place', null, 'file.save', 'file.saveas', null, 'file.export.png', 'file.export.jpeg', 'file.export.webp', null, 'file.windows']],
   ['EDIT', ['edit.undo', 'edit.redo', null, 'edit.fill', 'edit.clear', null, 'edit.transform']],
   ['IMAGE', ['image.size', 'image.canvas', 'image.cropsel', null,
     { sub: 'ADJUSTMENTS', items: () => FILTERS.filter(f => f.group === 'adjust').map(f => 'fx.' + f.id) },
@@ -432,7 +463,7 @@ const MENU_LAYOUT = [
   ['SELECT', ['select.all', 'select.none', 'select.invert', null, 'select.bycolor']],
   ['FILTER', ['filter.repeat', null, { sub: 'ALL FILTERS', items: () => FILTERS.filter(f => f.group === 'filter').map(f => 'fx.' + f.id) }]],
   ['VIEW', ['view.zoomin', 'view.zoomout', 'view.fit', 'view.hundred', null, 'view.fullscreen']],
-  ['HELP', ['help.shortcuts', 'help.about', null, 'file.windows', 'help.home']],
+  ['HELP', ['help.shortcuts', 'help.diagnostics', 'help.report', null, 'help.about', 'file.windows', 'help.home']],
 ];
 
 export function buildMenus(app) {
@@ -989,6 +1020,53 @@ function buildActionsPanel(app, host) {
     replaceTarget(next, label); app.requestRender(); refreshActive();
   };
 
+  const editMask = async (effectIndex) => {
+    const D = app.doc, T = target(); if (!D || !T) return;
+    let effect = T.effects[effectIndex];
+    if (!effect.maskId || !D.signalMasks.has(effect.maskId)) {
+      const id = D.createSignalMask(true);
+      changeStack('Create paint mask', stack => { stack[effectIndex].mask = 'raster'; stack[effectIndex].maskId = id; });
+      effect = target().effects[effectIndex];
+    }
+    const alpha = D.signalMasks.get(effect.maskId);
+    const max = 480, scale = Math.min(1, max / Math.max(D.width, D.height));
+    const w = Math.max(1, Math.round(D.width * scale)), h = Math.max(1, Math.round(D.height * scale));
+    await dialog('PAINT SIGNAL MASK', bodyEl => {
+      const source = makeCanvas(D.width, D.height), sctx = source.getContext('2d'), src = sctx.createImageData(D.width, D.height);
+      for (let i = 0; i < alpha.length; i++) src.data.set([255, 255, 255, alpha[i]], i * 4);
+      sctx.putImageData(src, 0, 0);
+      const canvas = makeCanvas(w, h), ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.clearRect(0, 0, w, h); ctx.drawImage(source, 0, 0, w, h);
+      canvas.className = 'mask-editor';
+      const tools = el('div', 'mask-tools');
+      const mode = el('select'); [['paint', 'PAINT'], ['erase', 'ERASE']].forEach(([v, n]) => { const o = el('option', null, n); o.value = v; mode.appendChild(o); });
+      const size = el('input'); size.type = 'range'; size.min = 2; size.max = 160; size.value = 36;
+      const density = el('input'); density.type = 'range'; density.min = 1; density.max = 100; density.value = 100;
+      const feather = el('input'); feather.type = 'range'; feather.min = 0; feather.max = 100; feather.value = 25;
+      tools.append(el('span', null, 'MODE'), mode, el('span', null, 'SIZE'), size, el('span', null, 'DENSITY'), density, el('span', null, 'FEATHER'), feather);
+      bodyEl.append(canvas, tools, el('div', 'dlg-note', 'White reveals the module; black protects the image. A selection seeds new masks.'));
+      let drawing = false;
+      const dab = e => {
+        const r = canvas.getBoundingClientRect(), x = (e.clientX - r.left) * w / r.width, y = (e.clientY - r.top) * h / r.height;
+        const radius = Number(size.value) / 2, soft = Number(feather.value) / 100;
+        const gradient = ctx.createRadialGradient(x, y, radius * (1 - soft), x, y, radius);
+        const value = mode.value === 'erase' ? '0' : '255', a = Number(density.value) / 100;
+        gradient.addColorStop(0, `rgba(${value},${value},${value},${a})`); gradient.addColorStop(1, `rgba(${value},${value},${value},0)`);
+        ctx.save(); ctx.globalCompositeOperation = mode.value === 'erase' ? 'destination-out' : 'source-over'; ctx.fillStyle = gradient; ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+      };
+      canvas.addEventListener('pointerdown', e => { drawing = true; canvas.setPointerCapture(e.pointerId); dab(e); });
+      canvas.addEventListener('pointermove', e => { if (drawing) dab(e); });
+      canvas.addEventListener('pointerup', () => { drawing = false; });
+      return { commit: () => {
+        sctx.clearRect(0, 0, D.width, D.height); sctx.drawImage(canvas, 0, 0, D.width, D.height);
+        const pixels = sctx.getImageData(0, 0, D.width, D.height).data;
+        for (let i = 0; i < alpha.length; i++) alpha[i] = pixels[i * 4 + 3];
+        D.changed(); app.requestRender();
+      } };
+    }, [{ label: 'Cancel' }, { label: 'Apply', primary: true, value: ctl => { ctl.commit(); return true; } }]);
+    refreshActive();
+  };
+
   mutateBtn.addEventListener('click', () => {
     const D = app.doc, T = target(); if (!T?.effects.length) return;
     const nextSeed = crypto.getRandomValues(new Uint32Array(1))[0];
@@ -1084,13 +1162,15 @@ function buildActionsPanel(app, host) {
       const maskRow = el('label', 'rack-param');
       const maskLabel = el('span', null, 'Mask');
       const maskSelect = el('select');
-      [['', 'NONE'], ['luma', 'LUMINANCE'], ['alpha', 'ALPHA']].forEach(([value, label]) => {
+      [['', 'NONE'], ['luma', 'LUMINANCE'], ['alpha', 'ALPHA'], ['raster', 'PAINTED']].forEach(([value, label]) => {
         const option = el('option', null, label); option.value = value; option.selected = (effect.mask || '') === value; maskSelect.appendChild(option);
       });
       const invertMask = el('button', 'rack-param-lock', effect.maskInvert ? 'INV' : 'NOR'); invertMask.type = 'button';
+      const editMaskBtn = el('button', 'rack-param-lock', 'EDIT'); editMaskBtn.type = 'button'; editMaskBtn.hidden = effect.mask !== 'raster';
       maskSelect.addEventListener('change', () => changeStack(f.name + ': Mask', s => { s[index].mask = maskSelect.value || null; }));
       invertMask.addEventListener('click', e => { e.preventDefault(); changeStack(f.name + ': Invert mask', s => { s[index].maskInvert = !s[index].maskInvert; } ); });
-      maskRow.append(maskLabel, invertMask, maskSelect); controls.appendChild(maskRow);
+      editMaskBtn.addEventListener('click', e => { e.preventDefault(); editMask(index); });
+      maskRow.append(maskLabel, invertMask, editMaskBtn, maskSelect); controls.appendChild(maskRow);
       for (const param of f.params) {
         const rowEl = el('label', 'rack-param');
         const lab = el('span', null, param.label); const val = el('output', null, String(effect.params?.[param.key] ?? param.def));

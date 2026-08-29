@@ -3,7 +3,7 @@
 
 import { Doc, Layer, TextLayer, makeCanvas } from './engine.js';
 
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;
 const MAX_DIMENSION = 32768;
 const MAX_PIXELS = 128 * 1024 * 1024;
 const MAX_LAYERS = 256;
@@ -83,9 +83,18 @@ export async function serializeDoc(doc, options = {}) {
     activeIndex: doc.activeIndex,
     effects: doc.effects || [],
     signalSeed: doc.signalSeed >>> 0,
+    masks: [],
     layers: [],
   };
   const files = {};
+  for (const [id, alpha] of doc.signalMasks || []) {
+    const canvas = makeCanvas(doc.width, doc.height), ctx = canvas.getContext('2d');
+    const image = ctx.createImageData(doc.width, doc.height);
+    for (let i = 0; i < alpha.length; i++) image.data.set([255, 255, 255, alpha[i]], i * 4);
+    ctx.putImageData(image, 0, 0);
+    files['masks/' + id + '.png'] = await canvasToPngBytesAsync(canvas);
+    meta.masks.push(id);
+  }
   for (const l of doc.layers) {
     const entry = {
       id: l.id, name: l.name, type: l.type,
@@ -151,6 +160,26 @@ export async function saveDpx(doc) {
   return new Blob([zipped], { type: 'application/zip' });
 }
 
+export async function saveProjectFile(doc, handle = null, forcePicker = false) {
+  const blob = await saveDpx(doc);
+  if ('showSaveFilePicker' in globalThis) {
+    let target = forcePicker ? null : handle;
+    if (!target) {
+      target = await showSaveFilePicker({
+        suggestedName: (doc.name || 'untitled').toLowerCase().replace(/[^a-z0-9_-]+/g, '-') + '.dpx',
+        types: [{ description: 'DEADPIXEL project', accept: { 'application/zip': ['.dpx'] } }],
+      });
+    }
+    const writable = await target.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    await rememberRecentProject(target);
+    return { handle: target, native: true };
+  }
+  downloadBlob(blob, (doc.name || 'untitled').toLowerCase().replace(/[^a-z0-9_-]+/g, '-') + '.dpx');
+  return { handle: null, native: false };
+}
+
 function loadImageFromBytes(bytes) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
@@ -165,6 +194,14 @@ export async function docFromFiles(files) {
   if (!files || !files['doc.json']) throw new Error('not a DEADPIXEL file');
   const meta = validateProjectMeta(JSON.parse(new TextDecoder().decode(files['doc.json'])));
   const doc = new Doc(meta.width, meta.height, { name: meta.name, bg: 'transparent' });
+  for (const id of Array.isArray(meta.masks) ? meta.masks : []) {
+    const bytes = files['masks/' + id + '.png']; if (!bytes) continue;
+    const img = await loadImageFromBytes(bytes), canvas = makeCanvas(meta.width, meta.height), ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0); const rgba = ctx.getImageData(0, 0, meta.width, meta.height).data;
+    const alpha = new Uint8ClampedArray(meta.width * meta.height);
+    for (let i = 0; i < alpha.length; i++) alpha[i] = rgba[i * 4 + 3];
+    doc.signalMasks.set(id, alpha);
+  }
   doc.layers = [];
   for (const le of meta.layers) {
     let layer;
@@ -237,14 +274,50 @@ export function docFromImage(img, name) {
 }
 
 /* ---- autosave (IndexedDB, crash recovery) ---- */
-const DB_NAME = 'deadpixel', STORE = 'autosave';
+const DB_NAME = 'deadpixel', STORE = 'autosave', RECENT_STORE = 'recent';
 function db() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    const req = indexedDB.open(DB_NAME, 2);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE);
+      if (!req.result.objectStoreNames.contains(RECENT_STORE)) req.result.createObjectStore(RECENT_STORE);
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
+}
+
+export async function rememberRecentProject(handle) {
+  if (!handle) return;
+  try {
+    const d = await db();
+    await new Promise((resolve, reject) => {
+      const tx = d.transaction(RECENT_STORE, 'readwrite');
+      tx.objectStore(RECENT_STORE).put({ handle, name: handle.name, when: Date.now() }, handle.name);
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+    d.close();
+  } catch (_) { /* handle persistence is optional */ }
+}
+
+export async function listRecentProjects() {
+  try {
+    const d = await db();
+    const records = await new Promise((resolve, reject) => {
+      const req = d.transaction(RECENT_STORE).objectStore(RECENT_STORE).getAll();
+      req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
+    });
+    d.close();
+    return records.sort((a, b) => b.when - a.when).slice(0, 8);
+  } catch (_) { return []; }
+}
+
+export async function fileFromRecentProject(record) {
+  if (!record?.handle) throw new Error('Recent project handle is unavailable');
+  let permission = await record.handle.queryPermission({ mode: 'readwrite' });
+  if (permission !== 'granted') permission = await record.handle.requestPermission({ mode: 'readwrite' });
+  if (permission !== 'granted') throw new DOMException('File access denied', 'NotAllowedError');
+  return record.handle.getFile();
 }
 let autosaveInFlight = null;
 let autosavePending = null;
@@ -255,6 +328,10 @@ async function writeAutosave(doc) {
   autosaveReporter('saving');
   try {
     const files = await serializeDoc(doc, { incremental: true });
+    const scale = Math.min(1, 240 / doc.width, 140 / doc.height);
+    const preview = makeCanvas(Math.max(1, Math.round(doc.width * scale)), Math.max(1, Math.round(doc.height * scale)));
+    preview.getContext('2d').drawImage(doc.compose(), 0, 0, preview.width, preview.height);
+    const thumbnail = await canvasToPngBytesAsync(preview);
     const d = await db();
     await new Promise((resolve, reject) => {
       const tx = d.transaction(STORE, 'readwrite');
@@ -262,7 +339,7 @@ async function writeAutosave(doc) {
       const get = store.get('history');
       get.onsuccess = () => {
         const history = Array.isArray(get.result) ? get.result : [];
-        history.push({ when: Date.now(), name: doc.name, files });
+        history.push({ when: Date.now(), name: doc.name, width: doc.width, height: doc.height, thumbnail, files });
         store.put(history.slice(-3), 'history');
         store.delete('last');
       };
@@ -286,7 +363,7 @@ export function autosave(doc) {
   });
   return autosaveInFlight;
 }
-export async function loadAutosave() {
+export async function loadAutosaves() {
   try {
     const d = await db();
     const rec = await new Promise((resolve, reject) => {
@@ -295,16 +372,32 @@ export async function loadAutosave() {
       const req = store.get('history');
       req.onsuccess = () => {
         const history = req.result;
-        if (Array.isArray(history) && history.length) { resolve(history[history.length - 1]); return; }
+        if (Array.isArray(history) && history.length) { resolve(history); return; }
         const legacy = store.get('last');
-        legacy.onsuccess = () => resolve(legacy.result);
+        legacy.onsuccess = () => resolve(legacy.result ? [legacy.result] : []);
         legacy.onerror = () => reject(legacy.error);
       };
       req.onerror = () => reject(req.error);
     });
     d.close();
-    return rec || null;
-  } catch (e) { return null; }
+    return rec || [];
+  } catch (e) { return []; }
+}
+export async function loadAutosave() {
+  const records = await loadAutosaves();
+  return records[records.length - 1] || null;
+}
+export async function deleteAutosave(when) {
+  try {
+    const d = await db();
+    await new Promise((resolve, reject) => {
+      const tx = d.transaction(STORE, 'readwrite');
+      const store = tx.objectStore(STORE), req = store.get('history');
+      req.onsuccess = () => store.put((req.result || []).filter(record => record.when !== when), 'history');
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+    d.close();
+  } catch (_) { /* optional recovery cleanup */ }
 }
 export async function clearAutosave() {
   try {
