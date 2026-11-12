@@ -42,9 +42,25 @@ const brushCommonOpts = [
 function paintableLayer(app) {
   const l = app.doc?.activeLayer;
   if (!l) return null;
+  if (app.maskTarget) { app.toast('MASK EDITING — USE BRUSH, PENCIL OR ERASER', true); return null; }
   if (l.locked) { app.toast('LAYER IS LOCKED', true); return null; }
+  if (l.type === 'group') { app.toast("CAN'T PAINT ON A GROUP — SELECT A LAYER", true); return null; }
   if (l.type === 'text') { app.toast('TEXT LAYER — RASTERIZE TO PAINT (Layer ▸ Rasterize)', true); return null; }
   return l;
+}
+
+/* layer targeted while app.maskTarget is on — groups/text keep their masks */
+function maskPaintableLayer(app) {
+  const l = app.doc?.activeLayer;
+  if (!l) return null;
+  if (l.locked) { app.toast('LAYER IS LOCKED', true); return null; }
+  if (!l.mask) { app.toast('ADD A LAYER MASK FIRST (Layer ▸ Layer Mask ▸ Reveal All)', true); return null; }
+  return l;
+}
+
+function fgLuminance(app) {
+  const { r, g, b } = hexToRgb(app.color.fg);
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
 }
 
 function strokeSettings(app, over = {}) {
@@ -78,14 +94,28 @@ T({
   onDown(app, p) {
     const l = app.doc.activeLayer;
     if (!l || l.locked) { if (l?.locked) app.toast('LAYER IS LOCKED', true); return; }
-    this.start = p; this.layer = l;
-    this.snap = l.type === 'text' ? { x: l.t.x, y: l.t.y } : copyCanvas(l.canvas);
-    this.moved = false;
+    this.start = p;
+    if (l.type === 'group') {
+      // whole subtree moves via incremental translates; history on up
+      this.groupId = l.id;
+      this.applied = { dx: 0, dy: 0 };
+    } else {
+      this.layer = l;
+      this.snap = l.type === 'text' ? { x: l.t.x, y: l.t.y } : copyCanvas(l.canvas);
+      this.moved = false;
+    }
   },
   onMove(app, p) {
     if (!this.start) return;
     const dx = Math.round(p.x - this.start.x), dy = Math.round(p.y - this.start.y);
     if (!dx && !dy) return;
+    if (this.groupId) {
+      const ddx = dx - this.applied.dx, ddy = dy - this.applied.dy;
+      if (!ddx && !ddy) return;
+      this.applied = { dx, dy };
+      app.doc.translateNode(this.groupId, ddx, ddy);
+      return;
+    }
     this.moved = true;
     const l = this.layer;
     if (l.type === 'text') {
@@ -99,6 +129,12 @@ T({
   },
   onUp(app, p) {
     if (!this.start) return;
+    if (this.groupId) {
+      const gid = this.groupId, { dx, dy } = this.applied;
+      this.start = null; this.groupId = null; this.applied = null;
+      if (dx || dy) app.doc.recordTranslate('Move group', gid, dx, dy);
+      return;
+    }
     const l = this.layer, snap = this.snap, moved = this.moved;
     this.start = null;
     if (!moved) return;
@@ -156,7 +192,7 @@ T({
     const [x1, y1] = app.docToScreen(Math.min(this.a.x, this.b.x), Math.min(this.a.y, this.b.y));
     const [x2, y2] = app.docToScreen(Math.max(this.a.x, this.b.x), Math.max(this.a.y, this.b.y));
     ctx.save();
-    ctx.strokeStyle = '#ff2233'; ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
+    ctx.strokeStyle = '#0d84ff'; ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
     if (this.state.shape === 'ellipse') {
       ctx.beginPath();
       ctx.ellipse((x1 + x2) / 2, (y1 + y2) / 2, (x2 - x1) / 2, (y2 - y1) / 2, 0, 0, Math.PI * 2);
@@ -206,7 +242,7 @@ T({
   drawOverlay(app, ctx) {
     if (!this.pts || !this.pts.length) return;
     ctx.save();
-    ctx.strokeStyle = '#ff2233'; ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
+    ctx.strokeStyle = '#0d84ff'; ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
     ctx.beginPath();
     this.pts.forEach((p, i) => {
       const [sx, sy] = app.docToScreen(p.x, p.y);
@@ -430,9 +466,9 @@ T({
     const W = ctx.canvas.width, H = ctx.canvas.height;
     ctx.fillRect(0, 0, W, y1); ctx.fillRect(0, y2, W, H - y2);
     ctx.fillRect(0, y1, x1, y2 - y1); ctx.fillRect(x2, y1, W - x2, y2 - y1);
-    ctx.strokeStyle = '#ff2233'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1.5;
     ctx.strokeRect(x1 + .5, y1 + .5, x2 - x1, y2 - y1);
-    ctx.font = '14px VT323, monospace'; ctx.fillStyle = '#ff2233';
+    ctx.font = '600 12px system-ui, sans-serif'; ctx.fillStyle = '#0d84ff';
     ctx.fillText(`${this.rect.w}×${this.rect.h}`, x1 + 6, y1 - 6);
     ctx.restore();
   },
@@ -458,10 +494,46 @@ T({
 });
 
 /* ---------------- brush-family factory ---------------- */
+/* stroke painted into the active layer's mask (white coverage over alpha);
+   'reveal' adds coverage (source-over), 'hide' removes it (destination-out) */
+class MaskStroke extends Stroke {
+  commit(label = 'Paint mask') {
+    const { doc, layer } = this;
+    if (!layer.mask) return;
+    doc.withMaskSnapshot(label, layer, (mctx) => {
+      let src = this.canvas;
+      if (doc.selection) {
+        src = makeCanvas(doc.width, doc.height);
+        src.getContext('2d').drawImage(this.canvas, 0, 0);
+        doc.selection.maskCanvas(src);
+      }
+      mctx.save();
+      mctx.globalAlpha = this.s.opacity;
+      mctx.globalCompositeOperation = this.s.maskMode === 'hide' ? 'destination-out' : 'source-over';
+      mctx.drawImage(src, 0, 0);
+      mctx.restore();
+    });
+  }
+}
+
 function paintTool(def) {
   return {
     ...def,
     onDown(app, p, e) {
+      if (app.maskTarget) {
+        const layer = maskPaintableLayer(app);
+        if (!layer) return;
+        // fg lighter than mid-gray reveals; darker (or the eraser) hides
+        const hide = this.id === 'eraser' || fgLuminance(app) < .5;
+        this.stroke = new MaskStroke(app.doc, layer, {
+          ...this.settings(app), color: '#ffffff', erase: false,
+          maskMode: hide ? 'hide' : 'reveal',
+        });
+        this.strokeLabel = this.id === 'eraser' ? 'Erase mask' : 'Paint mask';
+        this.stroke.moveTo(p.x, p.y, p.pressure);
+        app.requestRender();
+        return;
+      }
       const layer = paintableLayer(app);
       if (!layer) return;
       this.stroke = new Stroke(app.doc, layer, this.settings(app));
@@ -475,8 +547,9 @@ function paintTool(def) {
     },
     onUp(app) {
       if (!this.stroke) return;
-      this.stroke.commit(this.label);
+      this.stroke.commit(this.strokeLabel || this.label);
       this.stroke = null;
+      this.strokeLabel = null;
       app.requestRender();
     },
     drawOverlay(app, ctx) {
@@ -582,7 +655,7 @@ T({
     if (this.src) {
       const [sx, sy] = app.docToScreen(this.src.x, this.src.y);
       ctx.save();
-      ctx.strokeStyle = '#ff2233'; ctx.lineWidth = 1;
+      ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(sx - 6, sy); ctx.lineTo(sx + 6, sy);
       ctx.moveTo(sx, sy - 6); ctx.lineTo(sx, sy + 6);
@@ -763,7 +836,7 @@ T({
     const [x1, y1] = app.docToScreen(this.a.x, this.a.y);
     const [x2, y2] = app.docToScreen(this.b.x, this.b.y);
     ctx.save();
-    ctx.strokeStyle = '#ff2233'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
     ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
     ctx.restore();
   },
@@ -845,7 +918,7 @@ T({
   drawOverlay(app, ctx) {
     if (!this.a) return;
     ctx.save();
-    ctx.strokeStyle = '#ff2233'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
     ctx.beginPath();
     const sa = app.docToScreen(this.a.x, this.a.y), sb = app.docToScreen(this.b.x, this.b.y);
     this.path(ctx, { x: sa[0], y: sa[1] }, { x: sb[0], y: sb[1] });
@@ -913,12 +986,13 @@ T({
   onDown(app, p, e) {
     // if clicking an existing text layer near its anchor, edit it
     const D = app.doc;
-    const hit = D.layers.findIndex(l => l.type === 'text' && l.visible &&
+    const flat = D.flatLayers;
+    const hit = flat.findIndex(l => l.type === 'text' && l.visible &&
       Math.abs(p.y - (l.t.y - l.t.size / 2)) < l.t.size * 1.5 * (String(l.t.text).split('\n').length) &&
       Math.abs(p.x - l.t.x) < D.width);
-    if (hit >= 0 && D.layers[hit].ctx.getImageData(Math.floor(clamp(p.x, 0, D.width - 1)), Math.floor(clamp(p.y, 0, D.height - 1)), 1, 1).data[3] > 0) {
+    if (hit >= 0 && flat[hit].ctx.getImageData(Math.floor(clamp(p.x, 0, D.width - 1)), Math.floor(clamp(p.y, 0, D.height - 1)), 1, 1).data[3] > 0) {
       D.activeIndex = hit;
-      app.editTextLayer(D.layers[hit]);
+      app.editTextLayer(flat[hit]);
       return;
     }
     app.startTextEntry(p);
@@ -971,6 +1045,7 @@ export const transformTool = {
     let layer = D.activeLayer;
     if (!layer) return false;
     if (layer.locked) { app.toast('LAYER IS LOCKED', true); return false; }
+    if (layer.type === 'group') { D.rasterizeGroup(null, 'Rasterize group'); layer = D.activeLayer; app.toast('GROUP RASTERIZED FOR TRANSFORM'); }
     if (layer.type === 'text') { D.rasterizeLayer(); layer = D.activeLayer; app.toast('TEXT RASTERIZED FOR TRANSFORM'); }
     // find content bounds
     const w = layer.canvas.width, h = layer.canvas.height;
@@ -1080,7 +1155,7 @@ export const transformTool = {
     if (!this.layer) return;
     const pts = this.corners().map(pt => app.docToScreen(pt.x, pt.y));
     ctx.save();
-    ctx.strokeStyle = '#ff2233'; ctx.lineWidth = 1.2; ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1.2; ctx.setLineDash([5, 4]);
     ctx.beginPath();
     pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
     ctx.closePath();

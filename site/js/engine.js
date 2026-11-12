@@ -1,8 +1,12 @@
-/* DEADPIXEL engine — document, layers, history, selection, compositing. */
+/* DEADPIXEL engine — document, layer tree, history, selection, compositing.
+   Layer tree: GroupLayer nodes hold children; raster and text layers are leaves.
+   Leaves can carry a nondestructive layer mask and a clipping flag. */
 
 let _uid = 1;
 export const uid = () => 'L' + (_uid++) + '_' + Date.now().toString(36);
 export const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+
+export const MAX_TREE_DEPTH = 8;
 
 export function makeCanvas(w, h) {
   const c = document.createElement('canvas');
@@ -28,44 +32,80 @@ export const BLEND_MODES = [
 
 /* ---------------------------------------------------------------- layers */
 
+/* shared, versioned visual state for every node (groups included) */
+function baseLayerState(self, name) {
+  self.id = uid();
+  self.name = name;
+  self.visible = true;
+  self.opacity = 1;
+  self.blend = 'source-over';
+  self.locked = false;
+  self.clipped = false;
+  self.revision = 0;
+  self.effects = [];
+  self.signalSeed = (Math.random() * 0xffffffff) >>> 0;
+  self.mask = null;            // grayscale layer mask (alpha = coverage)
+  self.maskEnabled = true;
+  self.maskRevision = 0;
+}
+
+/* copy shared visual state; canvases are handled by the caller */
+function copyShared(from, to) {
+  to.name = from.name;
+  to.visible = from.visible;
+  to.opacity = from.opacity;
+  to.blend = from.blend;
+  to.locked = from.locked;
+  to.clipped = from.clipped;
+  to.revision = from.revision;
+  to.effects = JSON.parse(JSON.stringify(from.effects || []));
+  to.signalSeed = from.signalSeed >>> 0;
+  to.mask = from.mask ? copyCanvas(from.mask) : null;
+  to.maskEnabled = from.maskEnabled;
+  to.maskRevision = from.maskRevision;
+  return to;
+}
+
 export class Layer {
   constructor(w, h, name = 'Layer') {
-    this.id = uid();
-    this.name = name;
+    baseLayerState(this, name);
     this.type = 'raster';
-    this.visible = true;
-    this.opacity = 1;
-    this.blend = 'source-over';
-    this.locked = false;
-    this.revision = 0;
-    this.effects = [];
-    this.signalSeed = (Math.random() * 0xffffffff) >>> 0;
     this.canvas = makeCanvas(w, h);
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
   }
   draw(ctx) { ctx.drawImage(this.canvas, 0, 0); }
   clone() {
-    const l = new Layer(this.canvas.width, this.canvas.height, this.name + ' copy');
-    l.visible = this.visible; l.opacity = this.opacity; l.blend = this.blend;
-    l.effects = JSON.parse(JSON.stringify(this.effects)); l.signalSeed = this.signalSeed;
+    const l = new Layer(this.canvas.width, this.canvas.height, this.name);
+    copyShared(this, l);
     l.ctx.drawImage(this.canvas, 0, 0);
     return l;
   }
-  resize(w, h, smooth = true) {
-    const old = this.canvas;
+  /* rebuild canvas (and mask, when present) at the new size through one draw fn */
+  _regeo(w, h, draw) {
+    const old = this.canvas, oldMask = this.mask;
     this.canvas = makeCanvas(w, h);
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
-    this.ctx.imageSmoothingEnabled = smooth;
-    this.ctx.imageSmoothingQuality = 'high';
-    this.ctx.drawImage(old, 0, 0, old.width, old.height, 0, 0, w, h);
+    draw(this.ctx, old, old.width, old.height);
+    if (oldMask) {
+      this.mask = makeCanvas(w, h);
+      const mctx = this.mask.getContext('2d', { willReadFrequently: true });
+      draw(mctx, oldMask, oldMask.width, oldMask.height);
+      this.maskRevision++;
+    }
+  }
+  resize(w, h, smooth = true) {
+    this._regeo(w, h, (ctx, src, sw, sh) => {
+      ctx.imageSmoothingEnabled = smooth;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(src, 0, 0, sw, sh, 0, 0, w, h);
+    });
   }
   /* rebuild canvas at new doc size, drawing old content at (dx,dy) */
   rebase(w, h, dx = 0, dy = 0) {
-    const old = this.canvas;
-    this.canvas = makeCanvas(w, h);
-    this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
-    this.ctx.drawImage(old, dx, dy);
+    this._regeo(w, h, (ctx, src) => ctx.drawImage(src, dx, dy));
   }
+  /* generic rotate/flip placement */
+  geoTransform(w, h, draw) { this._regeo(w, h, draw); }
 }
 
 export class TextLayer extends Layer {
@@ -99,17 +139,98 @@ export class TextLayer extends Layer {
     this.name = (String(t.text).split('\n')[0] || 'Text').slice(0, 24);
   }
   clone() {
-    const l = new TextLayer(this.canvas.width, this.canvas.height, { name: this.name + ' copy', t: { ...this.t } });
+    const l = new TextLayer(this.canvas.width, this.canvas.height, { name: this.name, t: { ...this.t } });
+    copyShared(this, l);
     l.visible = this.visible; l.opacity = this.opacity; l.blend = this.blend;
-    l.effects = JSON.parse(JSON.stringify(this.effects)); l.signalSeed = this.signalSeed;
     return l;
   }
   rasterize() {
     const l = new Layer(this.canvas.width, this.canvas.height, this.name);
     l.visible = this.visible; l.opacity = this.opacity; l.blend = this.blend;
+    l.locked = this.locked; l.clipped = this.clipped;
     l.ctx.drawImage(this.canvas, 0, 0);
+    if (this.mask) { l.mask = copyCanvas(this.mask); l.maskEnabled = this.maskEnabled; }
     return l;
   }
+}
+
+/* layer folder: composites its children into one buffer, then blends as a unit */
+export class GroupLayer {
+  constructor(name = 'Group') {
+    baseLayerState(this, name);
+    this.type = 'group';
+    this.expanded = true;      // panel disclosure state
+    this.children = [];
+  }
+  clone() { // deep duplicate of the subtree
+    const g = new GroupLayer(this.name);
+    copyShared(this, g);
+    g.expanded = this.expanded;
+    g.children = this.children.map(c => c.clone());
+    return g;
+  }
+  /* adopt the state of a shallow structural clone (children array copied) */
+  assign(other) {
+    Object.assign(this, other);
+    this.children = other.children.slice();
+    return this;
+  }
+  contains(id) {
+    if (this.children.some(c => c.id === id)) return true;
+    return this.children.some(c => c.type === 'group' && c.contains(id));
+  }
+  /* content bounds of the whole subtree (shared with selection code) */
+  contentBounds() {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const c of this.children) {
+      const b = c.type === 'group' ? c.contentBounds() : boundsOf(c);
+      if (!b) continue;
+      x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
+      x1 = Math.max(x1, b.x + b.w - 1); y1 = Math.max(y1, b.y + b.h - 1);
+    }
+    return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+  }
+}
+
+function boundsOf(layer) {
+  if (layer.type === 'text') return textBounds(layer);
+  const w = layer.canvas.width, h = layer.canvas.height;
+  const d = layer.ctx.getImageData(0, 0, w, h).data;
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (d[(y * w + x) * 4 + 3] > 0) {
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+  }
+  return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+
+function textBounds(layer) {
+  const t = layer.t, lines = String(t.text).split('\n');
+  const ctx = layer.ctx;
+  ctx.font = layer.font();
+  let w = 1;
+  for (const line of lines) w = Math.max(w, ctx.measureText(line).width);
+  return { x: t.x, y: t.y - t.size, w: Math.ceil(w), h: Math.ceil(lines.length * t.size * t.lineHeight) };
+}
+
+/* ------------------------------------------------------------- tree utils */
+
+export function flattenLayers(list, out = []) {
+  for (const l of list) { out.push(l); if (l.type === 'group') flattenLayers(l.children, out); }
+  return out;
+}
+
+export function countLeaves(list) {
+  let n = 0;
+  for (const l of list) n += l.type === 'group' ? countLeaves(l.children) : 1;
+  return n;
+}
+
+/* shallow structural clone: new arrays + new group wrappers, shared leaf objects */
+function cloneLevel(list) {
+  return list.map(l => l.type === 'group' ? new GroupLayer().assign(l) : l);
 }
 
 /* --------------------------------------------------------------- history */
@@ -309,7 +430,7 @@ export class Doc extends EventTarget {
     this.height = Math.round(h);
     this.name = opts.name || 'UNTITLED';
     this.layers = [];
-    this.activeIndex = 0;
+    this._activeId = null;      // active node id (layer or group)
     this.selection = null;
     this.effects = [];
     this.signalMasks = new Map();
@@ -333,9 +454,39 @@ export class Doc extends EventTarget {
       base.ctx.fillRect(0, 0, w, h);
     }
     this.layers.push(base);
+    this._activeId = base.id;
   }
-  get activeLayer() { return this.layers[this.activeIndex] || null; }
 
+  /* ----------------------------- tree walking ----------------------------- */
+  get flatLayers() { return flattenLayers(this.layers); }
+  findLayer(id) { return id == null ? null : flattenLayers(this.layers).find(l => l.id === id) || null; }
+  locate(id) { // {list, index, parent} — parent null for root
+    const search = (list, parent) => {
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].id === id) return { list, index: i, parent };
+        if (list[i].type === 'group') {
+          const hit = search(list[i].children, list[i]);
+          if (hit) return hit;
+        }
+      }
+      return null;
+    };
+    return search(this.layers, null);
+  }
+  isDescendantOf(id, ancestorId) {
+    const a = this.findLayer(ancestorId);
+    return !!(a && a.type === 'group' && a.contains(id));
+  }
+  get activeLayer() { return this.findLayer(this._activeId); }
+  get activeIndex() { return this.flatLayers.findIndex(l => l.id === this._activeId); }
+  set activeIndex(i) {
+    const flat = this.flatLayers;
+    const target = flat[clamp(i, 0, flat.length - 1)];
+    this._activeId = target ? target.id : null;
+  }
+  setActiveId(id) { if (this.findLayer(id)) this._activeId = id; }
+
+  /* ------------------------ non destructive rack -------------------------- */
   createSignalMask(fromSelection = true) {
     const id = 'M' + uid();
     const data = new Uint8ClampedArray(this.width * this.height);
@@ -360,6 +511,145 @@ export class Doc extends EventTarget {
     this.dispatchEvent(new CustomEvent('change', { detail: { structural } }));
   }
 
+  /* --------------------------- compositing core --------------------------- */
+  /* signature of a subtree — anything that changes its rendered output */
+  _nodeSig(l) {
+    if (l.type === 'group') {
+      return 'G{'
+        + `${l.id}:${l.visible?1:0}:${l.opacity}:${l.blend}:${l.clipped?1:0}`
+        + `:fx${l._effectsBypassed ? 'B' : (l.effects?.length ? 'Y' + this._fxSeedPart(l) : '')}`
+        + `:${this._maskSig(l)}:` + this._childrenSig(l) + '}';
+    }
+    return `${l.id}:${l.revision}:${l.visible?1:0}:${l.opacity}:${l.blend}:${l.clipped?1:0}`
+      + `:fx${l._effectsBypassed ? 'B' : (l.effects?.length ? l._effectCacheKey || '?' : '')}`
+      + `:${this._maskSig(l)}`;
+  }
+  _childrenSig(l) {
+    return l.children.map(c => this._nodeSig(c)).join('|');
+  }
+  _maskSig(l) {
+    return l.mask ? (l.maskEnabled ? 'M' + l.maskRevision : 'Moff' + l.maskRevision) : '-';
+  }
+  _fxSeedPart(l) { return (l.signalSeed >>> 0).toString(36) + ':' + (this.maskRevision >>> 0).toString(36); }
+
+  /* children composited into a cached, doc-sized buffer.
+     (The group's own layer mask is applied later, in _layerContent,
+      so it clips the final output after the group's Signal Rack.) */
+  _groupBuffer(g, preview = false, onReady = null) {
+    const sig = this._childrenSig(g);
+    if (g._groupCache && g._groupCache.key === sig) return g._groupCache.canvas;
+    const canvas = makeCanvas(this.width, this.height);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    this._renderLayers(g.children, ctx, preview, onReady);
+    g._groupCache = { canvas, key: sig };
+    return canvas;
+  }
+
+  /* one node's drawable content: leaf canvas or group buffer, with its
+     Signal Rack stack applied, then its layer mask applied. May start an
+     async preview job and return the stale canvas meanwhile. */
+  _layerContent(l, preview = false, onReady = null) {
+    let base = l.type === 'group' ? this._groupBuffer(l, preview, onReady) : l.canvas;
+    if (l.effects?.length && this.effectProcessor && !l._effectsBypassed) {
+      const key = l.type === 'group' ? 'G|' + this._childrenSig(l) : l.revision + ':' + this.maskRevision;
+      const fullKey = key + ':' + l.signalSeed + ':' + JSON.stringify(l.effects);
+      if (l._signalStageCache?.inputRevision !== key) l._signalStageCache = { inputRevision: key };
+      if (l._effectCacheKey !== fullKey) {
+        if (preview && this.effectProcessorAsync) {
+          if (l._effectPendingKey !== fullKey) {
+            if (l._effectPending) this.onProcessingChange?.(false);
+            const token = {}; l._effectPending = token; l._effectPendingKey = fullKey;
+            this.onProcessingChange?.(true);
+            const input = copyCanvas(base);
+            this.effectProcessorAsync(input, l.effects, l.signalSeed, l._signalStageCache ||= {}).then((pixels) => {
+              if (l._effectPending !== token) return;
+              l._effectPending = null; l._effectPendingKey = null; this.onProcessingChange?.(false);
+              const stale = l.type === 'group' ? 'G|' + this._childrenSig(l) : l.revision + ':' + this.maskRevision;
+              if (stale + ':' + l.signalSeed + ':' + JSON.stringify(l.effects) !== fullKey) return;
+              const output = makeCanvas(this.width, this.height), image = output.getContext('2d').createImageData(this.width, this.height);
+              image.data.set(pixels); output.getContext('2d').putImageData(image, 0, 0);
+              l._effectCache = output; l._effectCacheKey = fullKey;
+              this._compoDirty = true; onReady?.();
+            }).catch(() => {
+              if (l._effectPending !== token) return;
+              l._effectPending = null; l._effectPendingKey = null; this.onProcessingChange?.(false);
+            });
+          }
+        } else {
+          if (l._effectPending) this.onProcessingChange?.(false);
+          l._effectPending = null; l._effectPendingKey = null;
+          l._effectCache = copyCanvas(base);
+          this.effectProcessor(l._effectCache, l.effects, l.signalSeed, l._signalStageCache ||= {});
+          l._effectCacheKey = fullKey;
+        }
+      }
+      if (l._effectCacheKey === fullKey) base = l._effectCache;
+    }
+    if (l.mask && l.maskEnabled) {
+      const outKey = this._maskSig(l) + '|' + (l._effectCacheKey || 'raw' + l.revision);
+      if (l._maskedCache?.key !== outKey) {
+        const masked = copyCanvas(base);
+        masked.getContext('2d').globalCompositeOperation = 'destination-in';
+        masked.getContext('2d').drawImage(l.mask, 0, 0);
+        l._maskedCache = { canvas: masked, key: outKey };
+      }
+      base = l._maskedCache.canvas;
+      l._contentKey = outKey;
+    } else {
+      l._contentKey = (l._effectCacheKey || 'raw' + l.revision + ':' + (l.type === 'group' ? this._childrenSig(l) : ''));
+    }
+    return base;
+  }
+
+  /* alpha-only copy used as the clip source for clipping masks; cached per node */
+  _clipSource(l, content) {
+    if (l._clipCache && l._clipCache.key === l._contentKey) return l._clipCache.canvas;
+    const c = makeCanvas(this.width, this.height);
+    c.getContext('2d').drawImage(content, 0, 0);
+    l._clipCache = { canvas: c, key: l._contentKey };
+    return c;
+  }
+
+  /* draw a sibling list (root or inside a group) honoring clip chains */
+  _renderLayers(list, ctx, preview = false, onReady = null) {
+    let clipBase = null;
+    for (let i = 0; i < list.length; i++) {
+      const l = list[i];
+      if (!l.visible || l.opacity <= 0) continue;
+      const content = this._layerContent(l, preview, onReady);
+      if (l.clipped && clipBase) {
+        if (l.blend === 'source-over' && l.opacity >= 1) {
+          const scratch = copyCanvas(content);
+          scratch.getContext('2d').globalCompositeOperation = 'destination-in';
+          scratch.getContext('2d').drawImage(clipBase, 0, 0);
+          ctx.drawImage(scratch, 0, 0);
+        } else {
+          // blend against the backdrop below, then keep only the base's alpha
+          const R = makeCanvas(this.width, this.height);
+          const rctx = R.getContext('2d');
+          rctx.drawImage(ctx.canvas, 0, 0);
+          rctx.globalAlpha = l.opacity;
+          rctx.globalCompositeOperation = l.blend;
+          rctx.drawImage(content, 0, 0);
+          rctx.globalAlpha = 1;
+          rctx.globalCompositeOperation = 'destination-in';
+          rctx.drawImage(clipBase, 0, 0);
+          ctx.drawImage(R, 0, 0);
+        }
+      } else {
+        ctx.globalAlpha = l.opacity;
+        ctx.globalCompositeOperation = l.blend;
+        ctx.drawImage(content, 0, 0);
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+        // a clip source is only needed when a later sibling is actually clipped
+        const laterClipped = list.slice(i + 1).some(s => s.clipped && s.visible && s.opacity > 0);
+        if (laterClipped && !l.clipped) clipBase = this._clipSource(l, content);
+        else if (l.clipped) clipBase = clipBase;
+      }
+    }
+  }
+
   _buildCompositeBase(preview = false, onReady = null) {
     if (this._compoDirty) {
       // Also invalidates jobs when callers toggle preview-only state directly.
@@ -367,50 +657,10 @@ export class Doc extends EventTarget {
       if (this._compoPending) this.onProcessingChange?.(false);
       this._compoPending = null;
       const ctx = this._compoCtx;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, this.width, this.height);
-      for (const l of this.layers) {
-        if (!l.visible || l.opacity <= 0) continue;
-        ctx.globalAlpha = l.opacity;
-        ctx.globalCompositeOperation = l.blend;
-        if (!l._effectsBypassed && l.effects?.length && this.effectProcessor) {
-          const cacheKey = l.revision + ':' + this.maskRevision + ':' + l.signalSeed + ':' + JSON.stringify(l.effects);
-          if (l._signalStageCache?.inputRevision !== l.revision || l._signalStageCache?.maskRevision !== this.maskRevision) {
-            l._signalStageCache = { inputRevision: l.revision, maskRevision: this.maskRevision };
-          }
-          if (l._effectCacheKey !== cacheKey) {
-            if (preview && this.effectProcessorAsync) {
-              if (l._effectPendingKey !== cacheKey) {
-                if (l._effectPending) this.onProcessingChange?.(false);
-                const token = {}; l._effectPending = token; l._effectPendingKey = cacheKey;
-                this.onProcessingChange?.(true);
-                const input = copyCanvas(l.canvas);
-                this.effectProcessorAsync(input, l.effects, l.signalSeed, l._signalStageCache ||= {}).then((pixels) => {
-                  if (l._effectPending !== token) return;
-                  l._effectPending = null; l._effectPendingKey = null; this.onProcessingChange?.(false);
-                  if (l.revision + ':' + this.maskRevision + ':' + l.signalSeed + ':' + JSON.stringify(l.effects) !== cacheKey) return;
-                  const output = makeCanvas(this.width, this.height), image = output.getContext('2d').createImageData(this.width, this.height);
-                  image.data.set(pixels); output.getContext('2d').putImageData(image, 0, 0);
-                  l._effectCache = output; l._effectCacheKey = cacheKey;
-                  this._compoDirty = true; onReady?.();
-                }).catch(() => {
-                  if (l._effectPending !== token) return;
-                  l._effectPending = null; l._effectPendingKey = null; this.onProcessingChange?.(false);
-                });
-              }
-            } else {
-              if (l._effectPending) this.onProcessingChange?.(false);
-              l._effectPending = null; l._effectPendingKey = null;
-              l._effectCache = copyCanvas(l.canvas);
-              this.effectProcessor(l._effectCache, l.effects, l.signalSeed, l._signalStageCache ||= {});
-              l._effectCacheKey = cacheKey;
-            }
-          }
-          ctx.drawImage(l._effectCacheKey === cacheKey ? l._effectCache : l.canvas, 0, 0);
-        } else l.draw(ctx);
-      }
-      ctx.globalAlpha = 1;
-      ctx.globalCompositeOperation = 'source-over';
-      const baseKey = this.maskRevision + '|' + this.layers.map(l => `${l.id}:${l.revision}:${l.visible}:${l.opacity}:${l.blend}:${l._effectCacheKey || ''}`).join('|');
+      this._renderLayers(this.layers, ctx, preview, onReady);
+      const baseKey = 'T' + this._childrenSig({ children: this.layers });
       if (this._signalStageCache?.baseKey !== baseKey) this._signalStageCache = { baseKey };
       this._compoDirty = false;
       this._compoEffectsApplied = this._effectsBypassed || !this.effects.length;
@@ -489,87 +739,338 @@ export class Doc extends EventTarget {
   }
 
   /* ---- structural ops (history-recorded) ---- */
-  _restoreLayers(snapshot, activeIndex) {
-    this.layers = snapshot.slice();
-    this.activeIndex = clamp(activeIndex, 0, this.layers.length - 1);
+  _snapshotTree() {
+    return { root: cloneLevel(this.layers), idx: this.activeIndex };
+  }
+  _restoreTree(s) {
+    this.layers = cloneLevel(s.root);
+    this.activeIndex = s.idx;
     this.changed(true);
   }
   _structural(label, mutate) {
-    const before = this.layers.slice(), beforeIdx = this.activeIndex;
+    const before = this._snapshotTree();
     mutate();
-    const after = this.layers.slice(), afterIdx = this.activeIndex;
-    this.history.push(label,
-      () => this._restoreLayers(before, beforeIdx),
-      () => this._restoreLayers(after, afterIdx));
+    const after = this._snapshotTree();
+    this.history.push(label, () => this._restoreTree(before), () => this._restoreTree(after));
     this.changed(true);
   }
+
+  /* flat index helpers used by legacy commands */
+  _locateActive() { return this.locate(this._activeId) || { list: this.layers, index: 0, parent: null }; }
+
   addLayer(layer = null, name = null) {
-    const l = layer || new Layer(this.width, this.height, name || 'Layer ' + (this.layers.length + 1));
+    const { list, index } = this._locateActive();
+    const l = layer || new Layer(this.width, this.height, name || 'Layer ' + (countLeaves(this.layers) + 1));
     this._structural('New layer', () => {
-      this.layers.splice(this.activeIndex + 1, 0, l);
-      this.activeIndex++;
+      list.splice(index + 1, 0, l);
+      this._activeId = l.id;
     });
     return l;
   }
-  removeLayer(i = this.activeIndex) {
-    if (this.layers.length <= 1) return;
+
+  addGroup(name = null) { // empty group placed above the active node
+    const { list, index } = this._locateActive();
+    const g = new GroupLayer(name || 'Group ' + (this.layers.filter(l => l.type === 'group').length + 1));
+    this._structural('New group', () => {
+      list.splice(index + 1, 0, g);
+      this._activeId = g.id;
+    });
+    return g;
+  }
+
+  groupFromActive() { // Ctrl+G: put the active node into a new group
+    const { list, index } = this._locateActive();
+    const active = list[index];
+    const g = new GroupLayer('Group ' + (this.layers.filter(l => l.type === 'group').length + 1));
+    this._structural('Group layer', () => {
+      g.children.push(active);
+      list[index] = g;
+      this._activeId = active.id; // stay on the moved node, like keeping a layer selected inside
+    });
+    return g;
+  }
+
+  removeLayer(id = null) {
+    const loc = this.locate(id ?? this._activeId);
+    if (!loc) return;
+    if (countLeaves(this.layers) <= 1) return;
     this._structural('Delete layer', () => {
-      this.layers.splice(i, 1);
-      this.activeIndex = clamp(this.activeIndex, 0, this.layers.length - 1);
+      loc.list.splice(loc.index, 1);
+      const flat = this.flatLayers;
+      this._activeId = flat.length ? flat[flat.length - 1].id : null;
     });
   }
-  duplicateLayer(i = this.activeIndex) {
-    const src = this.layers[i]; if (!src) return;
+
+  duplicateLayer(id = null) {
+    const at = this.locate(id ?? this._activeId);
+    if (!at) return;
+    const src = at.list[at.index];
+    const copy = src.clone();
     this._structural('Duplicate layer', () => {
-      this.layers.splice(i + 1, 0, src.clone());
-      this.activeIndex = i + 1;
+      at.list.splice(at.index + 1, 0, copy);
+      this._activeId = copy.id;
     });
+    return copy;
   }
-  moveLayer(from, to) {
-    if (from === to || to < 0 || to >= this.layers.length) return;
+
+  moveWithinSiblings(id = null, dir = 1) { // +1 = up in the stack, -1 = down
+    const at = this.locate(id ?? this._activeId);
+    if (!at) return;
+    const to = at.index + dir;
+    if (to < 0 || to >= at.list.length) return;
     this._structural('Reorder layer', () => {
-      const [l] = this.layers.splice(from, 1);
-      this.layers.splice(to, 0, l);
-      this.activeIndex = to;
+      const [l] = at.list.splice(at.index, 1);
+      at.list.splice(to, 0, l);
+      this._activeId = l.id;
     });
   }
-  mergeDown(i = this.activeIndex) {
-    if (i <= 0) return;
-    const top = this.layers[i], bottom = this.layers[i - 1];
+
+  reparent(id, parentId = null, index = 0, label = 'Reorder layer') {
+    const at = this.locate(id);
+    if (!at) return false;
+    if (parentId != null && (parentId === id || this.isDescendantOf(parentId, id))) return false;
+    const parent = parentId == null ? null : this.findLayer(parentId);
+    if (parentId != null && (!parent || parent.type !== 'group')) return false;
+    const target = parentId == null ? this.layers : parent.children;
+    this._structural(label, () => {
+      const [l] = at.list.splice(at.index, 1);
+      target.splice(clamp(index, 0, target.length), 0, l);
+      this._activeId = l.id;
+    });
+    return true;
+  }
+
+  /* legacy flat-index move (kept for command compatibility).
+     Semantics match array splice: remove at `from`, insert at `to`
+     in the flattened DFS order of the tree. */
+  moveLayer(from, to) {
+    const flat = this.flatLayers;
+    if (from < 0 || from >= flat.length || to < 0 || to >= flat.length || from === to) return;
+    const moved = flat[from], anchor = flat[to];
+    const insertAfter = to > from;
+    this._structural('Reorder layer', () => {
+      const loc0 = this.locate(moved.id);
+      loc0.list.splice(loc0.index, 1);
+      let list, index;
+      if (anchor.type === 'group' && insertAfter) {
+        list = anchor.children; index = 0;
+      } else {
+        const locA = this.locate(anchor.id);
+        list = locA.list;
+        index = locA.index + (insertAfter ? 1 : 0);
+      }
+      list.splice(clamp(index, 0, list.length), 0, moved);
+      this._activeId = moved.id;
+    });
+  }
+
+  mergeDown(id = null) {
+    const at = this.locate(id ?? this._activeId);
+    if (!at || at.index <= 0) return;
+    const top = at.list[at.index], bottom = at.list[at.index - 1];
+    const bottomContent = this._layerContent(bottom);
     const merged = new Layer(this.width, this.height, bottom.name);
     merged.visible = true;
     merged.opacity = bottom.opacity !== 1 || bottom.blend !== 'source-over' ? 1 : bottom.opacity;
+    merged.clipped = bottom.clipped;
     merged.ctx.globalAlpha = bottom.opacity;
-    merged.ctx.globalCompositeOperation = 'source-over';
-    if (bottom.visible) bottom.draw(merged.ctx);
+    merged.ctx.globalCompositeOperation = bottom.blend;
+    if (bottom.visible) merged.ctx.drawImage(bottomContent, 0, 0);
     merged.ctx.globalAlpha = top.opacity;
     merged.ctx.globalCompositeOperation = top.blend;
-    if (top.visible) top.draw(merged.ctx);
+    if (top.visible) merged.ctx.drawImage(this._layerContent(top), 0, 0);
     merged.ctx.globalAlpha = 1;
     merged.ctx.globalCompositeOperation = 'source-over';
     this._structural('Merge down', () => {
-      this.layers.splice(i - 1, 2, merged);
-      this.activeIndex = i - 1;
+      at.list.splice(at.index - 1, 2, merged);
+      this._activeId = merged.id;
     });
   }
+
+  /* rasterize a group into one layer (PS "Merge Group") */
+  rasterizeGroup(id = null, label = 'Merge group', bakeGroupProps = true) {
+    const at = this.locate(id ?? this._activeId);
+    if (!at) return;
+    const g = at.list[at.index];
+    if (g.type !== 'group') return;
+    const buffer = copyCanvas(this._groupBuffer(g));
+    if (g.effects?.length && this.effectProcessor && !g._effectsBypassed) {
+      this.effectProcessor(buffer, this.effectsWithMasks(g.effects), g.signalSeed, {});
+    }
+    if (g.mask && g.maskEnabled) {
+      buffer.getContext('2d').globalCompositeOperation = 'destination-in';
+      buffer.getContext('2d').drawImage(g.mask, 0, 0);
+      buffer.getContext('2d').globalCompositeOperation = 'source-over';
+    }
+    const merged = new Layer(this.width, this.height, g.name);
+    if (bakeGroupProps) {
+      merged.visible = g.visible; merged.opacity = g.opacity;
+      merged.blend = g.blend; merged.clipped = g.clipped;
+      merged.mask = g.mask ? copyCanvas(g.mask) : null;
+      merged.maskEnabled = g.maskEnabled;
+      merged.signalSeed = g.signalSeed >>> 0;
+    }
+    merged.ctx.drawImage(buffer, 0, 0);
+    this._structural(label, () => {
+      at.list.splice(at.index, 1, merged);
+      this._activeId = merged.id;
+    });
+    return merged;
+  }
+
   flatten() {
     const flat = new Layer(this.width, this.height, 'Background');
     flat.ctx.drawImage(this.compose(), 0, 0);
     this._structural('Flatten', () => {
       this.layers = [flat];
-      this.activeIndex = 0;
+      this._activeId = flat.id;
     });
   }
-  rasterizeLayer(i = this.activeIndex) {
-    const l = this.layers[i];
-    if (!l || l.type !== 'text') return;
+
+  rasterizeLayer(id = null) {
+    const at = this.locate(id ?? this._activeId);
+    if (!at) return;
+    const l = at.list[at.index];
+    if (l.type !== 'text') return;
     this._structural('Rasterize text', () => {
-      this.layers.splice(i, 1, l.rasterize());
+      at.list.splice(at.index, 1, l.rasterize());
+      this._activeId = at.list[at.index].id;
     });
+  }
+
+  /* group/leaf translation used by the move tool and arrow-key nudging */
+  translateNode(id, dx, dy) {
+    const l = this.findLayer(id);
+    if (!l) return;
+    const walk = (node) => {
+      if (node.type === 'group') { node.children.forEach(walk); return; }
+      if (node.type === 'text') { node.t.x += dx; node.t.y += dy; node.render(); }
+      else node.rebase(node.canvas.width, node.canvas.height, dx, dy);
+    };
+    walk(l);
+    this.changed();
+  }
+
+  recordTranslate(label, id, dx, dy) {
+    this.history.push(label,
+      () => this.translateNode(id, -dx, -dy),
+      () => this.translateNode(id, dx, dy),
+      { bytes: 0 });
+  }
+
+  /* ---- layer masks ---- */
+  addLayerMask(id = null, mode = 'reveal-all', label = 'Layer mask') {
+    const at = this.locate(id ?? this._activeId);
+    if (!at || !at.list[at.index]) return;
+    const layer = at.list[at.index];
+    if (layer.mask) return;
+    const m = makeCanvas(this.width, this.height);
+    const mctx = m.getContext('2d');
+    if (mode === 'hide-all') { /* fully black */ }
+    else if ((mode === 'reveal-sel' || mode === 'hide-sel') && this.selection) {
+      mctx.drawImage(this.selection.mask, 0, 0);
+      if (mode === 'hide-sel') {
+        mctx.globalCompositeOperation = 'destination-out';
+        mctx.drawImage(this.selection.mask, 0, 0);
+        mctx.globalCompositeOperation = 'source-over';
+      }
+    } else { mctx.fillStyle = '#fff'; mctx.fillRect(0, 0, this.width, this.height); }
+    const after = { mask: m, maskEnabled: true, maskRevision: layer.maskRevision + 1 };
+    const before = { mask: null, maskEnabled: true, maskRevision: layer.maskRevision };
+    const apply = (state) => {
+      layer.mask = state.mask; layer.maskEnabled = state.maskEnabled;
+      layer.maskRevision = state.maskRevision; this.changed();
+    };
+    this.history.push(label, () => apply(before), () => apply(after));
+    apply(after);
+  }
+
+  deleteLayerMask(id = null, applyToPixels = false, label = 'Delete mask') {
+    const at = this.locate(id ?? this._activeId);
+    if (!at) return;
+    const layer = at.list[at.index];
+    if (!layer.mask) return;
+    if (applyToPixels && layer.type !== 'group' && !layer.locked) {
+      // bake: keep pixels only where the mask shows them
+      const before = copyCanvas(layer.canvas);
+      layer.ctx.globalCompositeOperation = 'destination-in';
+      layer.ctx.drawImage(layer.mask, 0, 0);
+      layer.ctx.globalCompositeOperation = 'source-over';
+      layer.revision++;
+      const after = copyCanvas(layer.canvas);
+      const maskRef = layer.mask;
+      const restore = (canvas, mask) => {
+        layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+        layer.ctx.drawImage(canvas, 0, 0);
+        layer.mask = mask;
+        layer.revision++; this.changed();
+      };
+      this.history.push('Apply mask', () => restore(before, maskRef), () => restore(after, null));
+    } else {
+      const states = { before: layer.mask, after: null };
+      this.history.push(label,
+        () => { layer.mask = states.before; this.changed(); },
+        () => { layer.mask = states.after; this.changed(); });
+      layer.mask = null;
+    }
+    this.changed();
+  }
+
+  toggleLayerMaskEnabled(id = null) {
+    const layer = this.findLayer(id ?? this._activeId);
+    if (!layer?.mask) return;
+    const was = layer.maskEnabled;
+    this.history.push('Enable/disable mask',
+      () => { layer.maskEnabled = was; this.changed(); },
+      () => { layer.maskEnabled = !was; this.changed(); });
+    layer.maskEnabled = !was;
+    this.changed();
+  }
+
+  /* history entry for painting on a layer mask (used by the brush tools) */
+  withMaskSnapshot(label, layer, fn) {
+    if (!layer?.mask) return fn();
+    const before = copyCanvas(layer.mask);
+    const wasRev = layer.maskRevision;
+    fn(layer.mask.getContext('2d', { willReadFrequently: true }));
+    const after = copyCanvas(layer.mask);
+    layer.maskRevision++;
+    this.history.push(label,
+      () => {
+        layer.mask.getContext('2d').clearRect(0, 0, layer.mask.width, layer.mask.height);
+        layer.mask.getContext('2d').drawImage(before, 0, 0);
+        layer.maskRevision++; this.changed();
+      },
+      () => {
+        layer.mask.getContext('2d').clearRect(0, 0, layer.mask.width, layer.mask.height);
+        layer.mask.getContext('2d').drawImage(after, 0, 0);
+        layer.maskRevision++; this.changed();
+      });
+    this.changed();
+  }
+  async withMaskSnapshotAsync(label, layer, fn) {
+    if (!layer?.mask) { if (fn) await fn(layer?.mask?.getContext?.('2d')); return; }
+    const before = copyCanvas(layer.mask);
+    await fn(layer.mask.getContext('2d', { willReadFrequently: true }));
+    const after = copyCanvas(layer.mask);
+    layer.maskRevision++;
+    this.history.push(label,
+      () => {
+        layer.mask.getContext('2d').clearRect(0, 0, layer.mask.width, layer.mask.height);
+        layer.mask.getContext('2d').drawImage(before, 0, 0);
+        layer.maskRevision++; this.changed();
+      },
+      () => {
+        layer.mask.getContext('2d').clearRect(0, 0, layer.mask.width, layer.mask.height);
+        layer.mask.getContext('2d').drawImage(after, 0, 0);
+        layer.maskRevision++; this.changed();
+      });
+    this.changed();
   }
 
   /* ---- pixel ops on a layer, history-recorded ---- */
   withLayerSnapshot(label, layer, fn) {
+    if (!layer || layer.type === 'group') return;
     const before = copyCanvas(layer.canvas);
     const wasText = layer.type === 'text' ? { ...layer.t } : null;
     fn();
@@ -595,6 +1096,7 @@ export class Doc extends EventTarget {
   }
 
   async withLayerSnapshotAsync(label, layer, fn) {
+    if (!layer || layer.type === 'group') return fn ? await fn() : undefined;
     const before = copyCanvas(layer.canvas);
     const wasText = layer.type === 'text' ? { ...layer.t } : null;
     await fn();
@@ -619,11 +1121,34 @@ export class Doc extends EventTarget {
     this.changed();
   }
 
+  /* clipping masks */
+  setClipped(id = null, flag = null, label = 'Clipping mask') {
+    const layer = this.findLayer(id ?? this._activeId);
+    if (!layer) return;
+    if (layer.clipped && flag === null) return this.releaseClip(id, label);
+    const was = layer.clipped;
+    const next = flag === null ? true : flag;
+    this.history.push(label,
+      () => { layer.clipped = was; this.changed(); },
+      () => { layer.clipped = next; this.changed(); });
+    layer.clipped = next;
+    this.changed();
+  }
+  releaseClip(id = null, label = 'Release clipping mask') {
+    const layer = this.findLayer(id ?? this._activeId);
+    if (!layer?.clipped) return;
+    this.history.push(label,
+      () => { layer.clipped = true; this.changed(); },
+      () => { layer.clipped = false; this.changed(); });
+    layer.clipped = false;
+    this.changed();
+  }
+
   /* ---- whole-document geometry (history via full snapshot) ---- */
   _geoSnapshot() {
     return {
       w: this.width, h: this.height,
-      layers: this.layers.slice(),
+      root: cloneLevel(this.layers),
       masks: new Map([...this.signalMasks].map(([id, data]) => [id, new Uint8ClampedArray(data)])),
       idx: this.activeIndex,
     };
@@ -632,7 +1157,7 @@ export class Doc extends EventTarget {
     this.width = s.w; this.height = s.h;
     this._compo = makeCanvas(s.w, s.h);
     this._compoCtx = this._compo.getContext('2d', { willReadFrequently: true });
-    this.layers = s.layers.slice();
+    this.layers = cloneLevel(s.root);
     this.signalMasks = new Map([...s.masks].map(([id, data]) => [id, new Uint8ClampedArray(data)]));
     this.activeIndex = s.idx;
     this.selection = null;
@@ -658,101 +1183,151 @@ export class Doc extends EventTarget {
     }
     this.signalMasks = transformed;
   }
+
+  /* Shared geometry walker: rebuilds the whole tree for image/canvas ops.
+     leaf(l) -> replacement leaf node; groupState.drawMask(ctx, srcMask, sw, sh)
+     -> optional re-placement of group masks. */
+  _geoTree(list, leaf, groupState = null, w = this.width, h = this.height) {
+    return list.map(l => {
+      if (l.type === 'group') {
+        const ng = new GroupLayer(l.name);
+        copyShared(l, ng);
+        ng.expanded = l.expanded;
+        ng.children = this._geoTree(l.children, leaf, groupState, w, h);
+        if (ng.mask && groupState?.drawMask) {
+          ng.mask = makeCanvas(w, h);
+          groupState.drawMask(ng.mask.getContext('2d'), l.mask, l.mask.width, l.mask.height);
+          ng.maskRevision = l.maskRevision + 1;
+        }
+        return ng;
+      }
+      return leaf(l);
+    });
+  }
+
   resizeImage(w, h, smooth = true) {
     this._geo('Image size', () => {
       const sx = w / this.width, sy = h / this.height;
-      this._transformSignalMasks(w, h, (ctx, src) => { ctx.imageSmoothingEnabled = smooth; ctx.drawImage(src, 0, 0, w, h); });
-      this.layers = this.layers.map(l => {
-        if (l.type === 'text') {
-          const nl = l.clone();
-          nl.name = l.name;
-          nl.t.size = Math.max(1, Math.round(l.t.size * sy));
-          nl.t.x = Math.round(l.t.x * sx); nl.t.y = Math.round(l.t.y * sy);
-          nl.canvas = makeCanvas(w, h);
-          nl.ctx = nl.canvas.getContext('2d', { willReadFrequently: true });
-          nl.render();
-          return nl;
-        }
+      const stretch = (ctx, src, sw, sh) => {
+        ctx.imageSmoothingEnabled = smooth;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(src, 0, 0, sw, sh, 0, 0, w, h);
+      };
+      this._transformSignalMasks(w, h, stretch);
+      this.layers = this._geoTree(this.layers, (l) => {
+        if (l.type === 'text') return this._resizeText(l, w, h, sx, sy);
         const nl = l.clone(); nl.name = l.name;
         nl.resize(w, h, smooth);
         return nl;
-      });
+      }, { drawMask: stretch }, w, h);
       this.width = w; this.height = h;
     });
   }
+  _resizeText(l, w, h, sx, sy) {
+    const nl = l.clone();
+    nl.name = l.name;
+    nl.t.size = Math.max(1, Math.round(l.t.size * sy));
+    nl.t.x = Math.round(l.t.x * sx); nl.t.y = Math.round(l.t.y * sy);
+    nl.canvas = makeCanvas(w, h);
+    nl.ctx = nl.canvas.getContext('2d', { willReadFrequently: true });
+    nl.render();
+    if (l.mask) {
+      nl.mask = makeCanvas(w, h);
+      const mctx = nl.mask.getContext('2d');
+      mctx.imageSmoothingEnabled = true;
+      mctx.imageSmoothingQuality = 'high';
+      mctx.drawImage(l.mask, 0, 0, l.mask.width, l.mask.height, 0, 0, w, h);
+      nl.maskRevision = l.maskRevision + 1;
+    } else nl.mask = null;
+    return nl;
+  }
+
+  /* text leaf rebuild shared by canvas-size and crop ops */
+  _geoTextLeaf(l, w, h, place, adjustT) {
+    const nl = l.clone();
+    nl.name = l.name;
+    adjustT(nl.t);
+    nl.canvas = makeCanvas(w, h);
+    nl.ctx = nl.canvas.getContext('2d', { willReadFrequently: true });
+    nl.render();
+    if (l.mask) {
+      nl.mask = makeCanvas(w, h);
+      place(nl.mask.getContext('2d'), l.mask);
+      nl.maskRevision = l.maskRevision + 1;
+    } else nl.mask = null;
+    return nl;
+  }
+
   resizeCanvas(w, h, anchor = 'center') {
     this._geo('Canvas size', () => {
       const ax = anchor.includes('left') ? 0 : anchor.includes('right') ? 1 : .5;
       const ay = anchor.includes('top') ? 0 : anchor.includes('bottom') ? 1 : .5;
       const dx = Math.round((w - this.width) * ax);
       const dy = Math.round((h - this.height) * ay);
-      this._transformSignalMasks(w, h, (ctx, src) => ctx.drawImage(src, dx, dy));
-      this.layers = this.layers.map(l => {
+      const place = (ctx, src) => ctx.drawImage(src, dx, dy);
+      this._transformSignalMasks(w, h, place);
+      this.layers = this._geoTree(this.layers, (l) => {
+        if (l.type === 'text') return this._geoTextLeaf(l, w, h, place, (t) => { t.x += dx; t.y += dy; });
         const nl = l.clone(); nl.name = l.name;
-        if (nl.type === 'text') {
-          nl.t.x += dx; nl.t.y += dy;
-          nl.canvas = makeCanvas(w, h);
-          nl.ctx = nl.canvas.getContext('2d', { willReadFrequently: true });
-          nl.render();
-        } else nl.rebase(w, h, dx, dy);
+        nl.rebase(w, h, dx, dy);
         return nl;
-      });
+      }, { drawMask: place }, w, h);
       this.width = w; this.height = h;
     });
   }
+
   crop(rect) {
     const { x, y, w, h } = rect;
     this._geo('Crop', () => {
-      this._transformSignalMasks(w, h, (ctx, src) => ctx.drawImage(src, -x, -y));
-      this.layers = this.layers.map(l => {
+      const place = (ctx, src) => ctx.drawImage(src, -x, -y);
+      this._transformSignalMasks(w, h, place);
+      this.layers = this._geoTree(this.layers, (l) => {
+        if (l.type === 'text') return this._geoTextLeaf(l, w, h, place, (t) => { t.x -= x; t.y -= y; });
         const nl = l.clone(); nl.name = l.name;
-        if (nl.type === 'text') {
-          nl.t.x -= x; nl.t.y -= y;
-          nl.canvas = makeCanvas(w, h);
-          nl.ctx = nl.canvas.getContext('2d', { willReadFrequently: true });
-          nl.render();
-        } else nl.rebase(w, h, -x, -y);
+        nl.rebase(w, h, -x, -y);
         return nl;
-      });
+      }, { drawMask: place }, w, h);
       this.width = w; this.height = h;
     });
   }
+
   rotateDoc(deg) { // 90, 180, 270
     this._geo('Rotate canvas', () => {
       const [w, h] = deg === 180 ? [this.width, this.height] : [this.height, this.width];
-      this._transformSignalMasks(w, h, (ctx, src) => { ctx.translate(w / 2, h / 2); ctx.rotate(deg * Math.PI / 180); ctx.drawImage(src, -src.width / 2, -src.height / 2); });
-      this.layers = this.layers.map(l => {
-        const src = l.type === 'text' ? l.rasterize() : l.clone();
-        src.name = l.name;
-        const nl = src;
-        const old = nl.canvas;
-        nl.canvas = makeCanvas(w, h);
-        nl.ctx = nl.canvas.getContext('2d', { willReadFrequently: true });
-        nl.ctx.save();
-        nl.ctx.translate(w / 2, h / 2);
-        nl.ctx.rotate(deg * Math.PI / 180);
-        nl.ctx.drawImage(old, -old.width / 2, -old.height / 2);
-        nl.ctx.restore();
+      const rot = (ctx, src, sw, sh) => {
+        ctx.save();
+        ctx.translate(w / 2, h / 2);
+        ctx.rotate(deg * Math.PI / 180);
+        ctx.drawImage(src, -sw / 2, -sh / 2);
+        ctx.restore();
+      };
+      this._transformSignalMasks(w, h, (ctx, src) => rot(ctx, src, src.width, src.height));
+      this.layers = this._geoTree(this.layers, (l) => {
+        const nl = l.type === 'text' ? l.rasterize() : l.clone();
+        nl.name = l.name;
+        nl.geoTransform(w, h, rot);
         return nl;
-      });
+      }, { drawMask: (ctx, src, sw, sh) => rot(ctx, src, sw, sh) }, w, h);
       this.width = w; this.height = h;
     });
   }
+
   flipDoc(horizontal) {
     this._geo(horizontal ? 'Flip horizontal' : 'Flip vertical', () => {
-      this._transformSignalMasks(this.width, this.height, (ctx, src, w, h) => { if (horizontal) { ctx.scale(-1, 1); ctx.drawImage(src, -w, 0); } else { ctx.scale(1, -1); ctx.drawImage(src, 0, -h); } });
-      this.layers = this.layers.map(l => {
+      const w = this.width, h = this.height;
+      const flip = (ctx, src, sw, sh) => {
+        ctx.save();
+        if (horizontal) { ctx.scale(-1, 1); ctx.drawImage(src, -sw, 0); }
+        else { ctx.scale(1, -1); ctx.drawImage(src, 0, -sh); }
+        ctx.restore();
+      };
+      this._transformSignalMasks(w, h, (ctx, src) => flip(ctx, src, src.width, src.height));
+      this.layers = this._geoTree(this.layers, (l) => {
         const nl = l.type === 'text' ? l.rasterize() : l.clone();
         nl.name = l.name;
-        const old = nl.canvas;
-        nl.canvas = makeCanvas(this.width, this.height);
-        nl.ctx = nl.canvas.getContext('2d', { willReadFrequently: true });
-        nl.ctx.save();
-        if (horizontal) { nl.ctx.scale(-1, 1); nl.ctx.drawImage(old, -this.width, 0); }
-        else { nl.ctx.scale(1, -1); nl.ctx.drawImage(old, 0, -this.height); }
-        nl.ctx.restore();
+        nl.geoTransform(w, h, flip);
         return nl;
-      });
+      }, { drawMask: (ctx, src, sw, sh) => flip(ctx, src, sw, sh) });
     });
   }
 

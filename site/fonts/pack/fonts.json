@@ -1,43 +1,357 @@
 [
-  {"family": "Anton", "file": "anton.woff2", "category": "display"},
-  {"family": "Archivo Black", "file": "archivo-black.woff2", "category": "display"},
-  {"family": "Bebas Neue", "file": "bebas-neue.woff2", "category": "display"},
-  {"family": "Black Ops One", "file": "black-ops-one.woff2", "category": "display"},
-  {"family": "Bungee", "file": "bungee.woff2", "category": "display"},
-  {"family": "Cinzel Decorative", "file": "cinzel-decorative.woff2", "category": "display"},
-  {"family": "Monoton", "file": "monoton.woff2", "category": "display"},
-  {"family": "Oswald", "file": "oswald.woff2", "category": "display"},
-  {"family": "Rubik Glitch", "file": "rubik-glitch.woff2", "category": "display"},
-  {"family": "Rye", "file": "rye.woff2", "category": "display"},
-  {"family": "Six Caps", "file": "six-caps.woff2", "category": "display"},
-  {"family": "Creepster", "file": "creepster.woff2", "category": "horror"},
-  {"family": "Eater", "file": "eater.woff2", "category": "horror"},
-  {"family": "Metal Mania", "file": "metal-mania.woff2", "category": "horror"},
-  {"family": "Nosifer", "file": "nosifer.woff2", "category": "horror"},
-  {"family": "Pirata One", "file": "pirata-one.woff2", "category": "horror"},
-  {"family": "UnifrakturMaguntia", "file": "unifrakturmaguntia.woff2", "category": "horror"},
-  {"family": "IBM Plex Mono", "file": "ibm-plex-mono.woff2", "category": "mono"},
-  {"family": "Major Mono Display", "file": "major-mono-display.woff2", "category": "mono"},
-  {"family": "Space Mono", "file": "space-mono.woff2", "category": "mono"},
-  {"family": "Xanh Mono", "file": "xanh-mono.woff2", "category": "mono"},
-  {"family": "Press Start 2P", "file": "press-start-2p.woff2", "category": "pixel"},
-  {"family": "Silkscreen", "file": "silkscreen.woff2", "category": "pixel"},
-  {"family": "Archivo", "file": "archivo.woff2", "category": "sans"},
-  {"family": "Barlow Condensed", "file": "barlow-condensed.woff2", "category": "sans"},
-  {"family": "Inter", "file": "inter.woff2", "category": "sans"},
-  {"family": "Space Grotesk", "file": "space-grotesk.woff2", "category": "sans"},
-  {"family": "Work Sans", "file": "work-sans.woff2", "category": "sans"},
-  {"family": "Caveat", "file": "caveat.woff2", "category": "script"},
-  {"family": "Homemade Apple", "file": "homemade-apple.woff2", "category": "script"},
-  {"family": "Pacifico", "file": "pacifico.woff2", "category": "script"},
-  {"family": "Permanent Marker", "file": "permanent-marker.woff2", "category": "script"},
-  {"family": "Shadows Into Light", "file": "shadows-into-light.woff2", "category": "script"},
-  {"family": "Cormorant Garamond", "file": "cormorant-garamond.woff2", "category": "serif"},
-  {"family": "Crimson Text", "file": "crimson-text.woff2", "category": "serif"},
-  {"family": "EB Garamond", "file": "eb-garamond.woff2", "category": "serif"},
-  {"family": "Libre Baskerville", "file": "libre-baskerville.woff2", "category": "serif"},
-  {"family": "Playfair Display", "file": "playfair-display.woff2", "category": "serif"},
-  {"family": "Alfa Slab One", "file": "alfa-slab-one.woff2", "category": "slab"},
-  {"family": "Ultra", "file": "ultra.woff2", "category": "slab"},
-  {"family": "Special Elite", "file": "special-elite.woff2", "category": "typewriter"}
+  {
+    "family": "Anton",
+    "file": "anton.woff2",
+    "category": "display"
+  },
+  {
+    "family": "Archivo Black",
+    "file": "archivo-black.woff2",
+    "category": "display"
+  },
+  {
+    "family": "Bebas Neue",
+    "file": "bebas-neue.woff2",
+    "category": "display"
+  },
+  {
+    "family": "Black Ops One",
+    "file": "black-ops-one.woff2",
+    "category": "display"
+  },
+  {
+    "family": "Bungee",
+    "file": "bungee.woff2",
+    "category": "display"
+  },
+  {
+    "family": "Cinzel Decorative",
+    "file": "cinzel-decorative.woff2",
+    "category": "display"
+  },
+  {
+    "family": "Monoton",
+    "file": "monoton.woff2",
+    "category": "display"
+  },
+  {
+    "family": "Oswald",
+    "file": "oswald.woff2",
+    "category": "display"
+  },
+  {
+    "family": "Rubik Glitch",
+    "file": "rubik-glitch.woff2",
+    "category": "display"
+  },
+  {
+    "family": "Rye",
+    "file": "rye.woff2",
+    "category": "display"
+  },
+  {
+    "family": "Six Caps",
+    "file": "six-caps.woff2",
+    "category": "display"
+  },
+  {
+    "family": "Freckle Face",
+    "file": "freckle-face.woff2",
+    "category": "grunge"
+  },
+  {
+    "family": "Rubik Burned",
+    "file": "rubik-burned.woff2",
+    "category": "grunge"
+  },
+  {
+    "family": "Rubik Dirt",
+    "file": "rubik-dirt.woff2",
+    "category": "grunge"
+  },
+  {
+    "family": "Rubik Distressed",
+    "file": "rubik-distressed.woff2",
+    "category": "grunge"
+  },
+  {
+    "family": "Rubik Marker Hatch",
+    "file": "rubik-marker-hatch.woff2",
+    "category": "grunge"
+  },
+  {
+    "family": "Rubik Microbe",
+    "file": "rubik-microbe.woff2",
+    "category": "grunge"
+  },
+  {
+    "family": "Rubik Puddles",
+    "file": "rubik-puddles.woff2",
+    "category": "grunge"
+  },
+  {
+    "family": "Rubik Spray Paint",
+    "file": "rubik-spray-paint.woff2",
+    "category": "grunge"
+  },
+  {
+    "family": "Rubik Storm",
+    "file": "rubik-storm.woff2",
+    "category": "grunge"
+  },
+  {
+    "family": "Rubik Vinyl",
+    "file": "rubik-vinyl.woff2",
+    "category": "grunge"
+  },
+  {
+    "family": "Underdog",
+    "file": "underdog.woff2",
+    "category": "grunge"
+  },
+  {
+    "family": "Creepster",
+    "file": "creepster.woff2",
+    "category": "horror"
+  },
+  {
+    "family": "Eater",
+    "file": "eater.woff2",
+    "category": "horror"
+  },
+  {
+    "family": "Metal Mania",
+    "file": "metal-mania.woff2",
+    "category": "horror"
+  },
+  {
+    "family": "Nosifer",
+    "file": "nosifer.woff2",
+    "category": "horror"
+  },
+  {
+    "family": "Pirata One",
+    "file": "pirata-one.woff2",
+    "category": "horror"
+  },
+  {
+    "family": "UnifrakturMaguntia",
+    "file": "unifrakturmaguntia.woff2",
+    "category": "horror"
+  },
+  {
+    "family": "IBM Plex Mono",
+    "file": "ibm-plex-mono.woff2",
+    "category": "mono"
+  },
+  {
+    "family": "Major Mono Display",
+    "file": "major-mono-display.woff2",
+    "category": "mono"
+  },
+  {
+    "family": "Space Mono",
+    "file": "space-mono.woff2",
+    "category": "mono"
+  },
+  {
+    "family": "Xanh Mono",
+    "file": "xanh-mono.woff2",
+    "category": "mono"
+  },
+  {
+    "family": "Press Start 2P",
+    "file": "press-start-2p.woff2",
+    "category": "pixel"
+  },
+  {
+    "family": "Silkscreen",
+    "file": "silkscreen.woff2",
+    "category": "pixel"
+  },
+  {
+    "family": "Barrio",
+    "file": "barrio.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "Frijole",
+    "file": "frijole.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "Londrina Sketch",
+    "file": "londrina-sketch.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "New Rocker",
+    "file": "new-rocker.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "Plaster",
+    "file": "plaster.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "Rock Salt",
+    "file": "rock-salt.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "Rubik Beastly",
+    "file": "rubik-beastly.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "Rubik Glitch Pop",
+    "file": "rubik-glitch-pop.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "Rubik Wet Paint",
+    "file": "rubik-wet-paint.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "Sedgwick Ave Display",
+    "file": "sedgwick-ave-display.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "Trade Winds",
+    "file": "trade-winds.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "Wallpoet",
+    "file": "wallpoet.woff2",
+    "category": "punk"
+  },
+  {
+    "family": "Archivo",
+    "file": "archivo.woff2",
+    "category": "sans"
+  },
+  {
+    "family": "Barlow Condensed",
+    "file": "barlow-condensed.woff2",
+    "category": "sans"
+  },
+  {
+    "family": "Inter",
+    "file": "inter.woff2",
+    "category": "sans"
+  },
+  {
+    "family": "Space Grotesk",
+    "file": "space-grotesk.woff2",
+    "category": "sans"
+  },
+  {
+    "family": "Work Sans",
+    "file": "work-sans.woff2",
+    "category": "sans"
+  },
+  {
+    "family": "Caveat",
+    "file": "caveat.woff2",
+    "category": "script"
+  },
+  {
+    "family": "Homemade Apple",
+    "file": "homemade-apple.woff2",
+    "category": "script"
+  },
+  {
+    "family": "Pacifico",
+    "file": "pacifico.woff2",
+    "category": "script"
+  },
+  {
+    "family": "Permanent Marker",
+    "file": "permanent-marker.woff2",
+    "category": "script"
+  },
+  {
+    "family": "Shadows Into Light",
+    "file": "shadows-into-light.woff2",
+    "category": "script"
+  },
+  {
+    "family": "Cormorant Garamond",
+    "file": "cormorant-garamond.woff2",
+    "category": "serif"
+  },
+  {
+    "family": "Crimson Text",
+    "file": "crimson-text.woff2",
+    "category": "serif"
+  },
+  {
+    "family": "EB Garamond",
+    "file": "eb-garamond.woff2",
+    "category": "serif"
+  },
+  {
+    "family": "Libre Baskerville",
+    "file": "libre-baskerville.woff2",
+    "category": "serif"
+  },
+  {
+    "family": "Playfair Display",
+    "file": "playfair-display.woff2",
+    "category": "serif"
+  },
+  {
+    "family": "Alfa Slab One",
+    "file": "alfa-slab-one.woff2",
+    "category": "slab"
+  },
+  {
+    "family": "Ultra",
+    "file": "ultra.woff2",
+    "category": "slab"
+  },
+  {
+    "family": "Averia Serif Libre",
+    "file": "averia-serif-libre.woff2",
+    "category": "typewriter"
+  },
+  {
+    "family": "Courier Prime",
+    "file": "courier-prime.woff2",
+    "category": "typewriter"
+  },
+  {
+    "family": "Cousine",
+    "file": "cousine.woff2",
+    "category": "typewriter"
+  },
+  {
+    "family": "Cutive Mono",
+    "file": "cutive-mono.woff2",
+    "category": "typewriter"
+  },
+  {
+    "family": "Nova Mono",
+    "file": "nova-mono.woff2",
+    "category": "typewriter"
+  },
+  {
+    "family": "Share Tech Mono",
+    "file": "share-tech-mono.woff2",
+    "category": "typewriter"
+  },
+  {
+    "family": "Special Elite",
+    "file": "special-elite.woff2",
+    "category": "typewriter"
+  },
+  {
+    "family": "Syne Mono",
+    "file": "syne-mono.woff2",
+    "category": "typewriter"
+  }
 ]

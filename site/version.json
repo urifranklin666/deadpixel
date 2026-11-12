@@ -1,5 +1,5 @@
 {
-  "version": "1.7.0",
-  "url": "https://github.com/urifranklin666/deadpixel/releases/tag/v1.7.0",
-  "notes": ["Module-stage Signal Rack caching", "Paint-mask lifecycle controls", "Pinned recent projects", "Configurable recovery settings", "Expanded performance diagnostics"]
+  "version": "1.8.0",
+  "url": "https://github.com/urifranklin666/deadpixel/releases/tag/v1.8.0",
+  "notes": ["Layer groups and layer trees", "Layer masks with brush editing", "Clipping masks", "Photoshop-style neutral dark UI", ".dpx v3 project format (groups/masks/clipping), fully backward compatible"]
 }

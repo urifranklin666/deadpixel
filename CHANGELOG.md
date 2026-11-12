@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.8.0
+
+### Added
+
+- Layer groups: nest, reorder, toggle, move whole subtrees, group blend/opacity/lock.
+- Layer masks: reveal-all / hide-all / from selection, brush and eraser mask painting, apply, delete, disable.
+- Clipping masks with Photoshop-style clip chains.
+- Layer panel rebuilt as a Photoshop-style tree with drag-drop reparenting, mask thumbnails, and a layer-mask popover.
+- Arrow-key nudging and free transform for whole groups.
+- .dpx project format v3 storing layer trees, layer masks, and clip state.
+
+### Changed
+
+- Neutral Photoshop-style dark UI replaces CRT chrome; menus follow Photoshop naming with a Layer Mask submenu.
+- Panels reorganized into stacked tab groups (Color/Brush/Signal Rack above Layers/History).
+
+### Compatibility
+
+- Documents that use no tree features still serialize as v2 bytes, so existing DEADPIXEL versions open new files.
+- Format-version-1 and v2 projects keep opening; masks and clipping only appear in v3 files.
+
 ## 1.5.0
 
 ### Added

@@ -73,6 +73,162 @@ test('DPX save and project loader round-trip document structure', async ({ page 
   expect(result).toEqual({ width: 1280, height: 800, layers: 1, effects: 0 });
 });
 
+test('layer groups composite children and toggle visibility as a unit', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const pixels = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'TREE TEST' }));
+    const D = app.doc, top = D.addLayer(null, 'TOP');
+    top.ctx.fillStyle = '#00ff00'; top.ctx.fillRect(10, 10, 40, 40); top.revision++;
+    D.changed();
+    const group = D.groupFromActive();
+    const px = (x, y) => { D.compose(); return Array.from(D._compoCtx.getImageData(x, y, 1, 1).data); };
+    const shown = px(30, 30), outside = px(58, 58);
+    group.visible = false; D.changed();
+    const hidden = px(30, 30);
+    return { activeType: D.activeLayer.type, flat: D.flatLayers.map(l => l.name), shown, outside, hidden };
+  });
+  expect(pixels.activeType).toBe('raster'); // active selection stays on the moved child
+  expect(pixels.flat).toEqual(['Background', 'Group 1', 'TOP']);
+  expect(pixels.shown).toEqual([0, 255, 0, 255]);
+  expect(pixels.outside).toEqual([0, 0, 0, 0]);
+  expect(pixels.hidden).toEqual([0, 0, 0, 0]);
+});
+
+test('layer masks hide and reveal composited pixels', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'MASK TEST' }));
+    const D = app.doc, layer = D.addLayer(null, 'MASKED');
+    layer.ctx.fillStyle = '#0000ff'; layer.ctx.fillRect(0, 20, 64, 30); layer.revision++;
+    D.addLayerMask(layer.id, 'reveal-all');
+    D.withMaskSnapshot('Paint mask', layer, mctx => {
+      mctx.globalCompositeOperation = 'destination-out';
+      mctx.fillRect(0, 20, 64, 12);
+    });
+    D.changed();
+    const px = (x, y) => { D.compose(); return Array.from(D._compoCtx.getImageData(x, y, 1, 1).data); };
+    const hidden = px(20, 25), shown = px(20, 45);
+    D.toggleLayerMaskEnabled(layer.id);
+    const restored = px(20, 25);
+    return { maskPresent: !!layer.mask, hidden, shown, restored };
+  });
+  expect(result.maskPresent).toBe(true);
+  expect(result.hidden).toEqual([0, 0, 0, 0]);
+  expect(result.shown).toEqual([0, 0, 255, 255]);
+  expect(result.restored).toEqual([0, 0, 255, 255]);
+});
+
+test('clipping masks confine a layer to the layer below', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'CLIP TEST' }));
+    const D = app.doc;
+    const base = D.activeLayer;
+    base.ctx.fillStyle = '#ff0000'; base.ctx.fillRect(8, 8, 32, 32); base.revision++;
+    const over = D.addLayer(null, 'OVER');
+    over.ctx.fillStyle = '#00ffff'; over.ctx.fillRect(0, 0, 64, 64); over.revision++;
+    D.setClipped(over.id, true);
+    D.changed();
+    const px = (x, y) => { D.compose(); return Array.from(D._compoCtx.getImageData(x, y, 1, 1).data); };
+    const inside = px(20, 20), outside = px(50, 50);
+    D.releaseClip(over.id);
+    const unclipped = px(50, 50);
+    return { clipped: over.clipped, inside, outside, unclipped };
+  });
+  expect(result.clipped).toBe(false); // releaseClip ran at the end of the flow
+  expect(result.inside).toEqual([0, 255, 255, 255]);
+  expect(result.outside).toEqual([0, 0, 0, 0]);
+  expect(result.unclipped).toEqual([0, 255, 255, 255]);
+});
+
+test('v3 projects round-trip groups, masks, and clipping through DPX', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    const io = await import('/js/io.js');
+    app.attachDoc(new Doc(64, 64, { name: 'TREE RP' }));
+    const D = app.doc;
+    const art = D.addLayer(null, 'ART');
+    art.ctx.fillStyle = '#ff0000'; art.ctx.fillRect(8, 8, 24, 24); art.revision++;
+    D.addLayerMask(art.id, 'reveal-all');
+    D.withMaskSnapshot('Paint mask', art, mctx => {
+      mctx.globalCompositeOperation = 'destination-out';
+      mctx.fillRect(0, 20, 64, 12);
+    });
+    const over = D.addLayer(null, 'OVER');
+    over.ctx.fillStyle = '#00ffff'; over.ctx.fillRect(0, 0, 64, 64); over.revision++;
+    D.setClipped(over.id, true);
+    const group = D.addGroup('SET');
+    D.reparent(art.id, group.id, 0, 'Round trip');
+    D.reparent(over.id, group.id, 1, 'Round trip');
+    D.changed();
+    const px = (doc, x, y) => { doc.compose(); return Array.from(doc._compoCtx.getImageData(x, y, 1, 1).data); };
+    const before = { inside: px(D, 20, 14), maskedOut: px(D, 20, 26), far: px(D, 50, 50) };
+
+    const blob = await io.saveDpx(D);
+    const restored = await io.openDpx(await blob.arrayBuffer());
+    app.attachDoc(restored);
+    restored.changed();
+    const rart = restored.flatLayers.find(l => l.name === 'ART');
+    const rover = restored.flatLayers.find(l => l.name === 'OVER');
+    const rgroup = restored.flatLayers.find(l => l.type === 'group');
+    const after = { inside: px(restored, 20, 14), maskedOut: px(restored, 20, 26), far: px(restored, 50, 50) };
+
+    const files = await io.serializeDoc(D);
+    const meta = JSON.parse(new TextDecoder().decode(files['doc.json']));
+    return {
+      before, after,
+      names: restored.flatLayers.map(l => l.name),
+      parentIsGroup: rgroup.name === 'SET' && rgroup.children.length === 2,
+      artMasked: !!rart.mask && rart.maskEnabled === true,
+      overClipped: rover.clipped === true,
+      metaVersion: meta.version,
+      treeShape: [meta.layersTree.length, meta.layersTree[1].type, meta.layersTree[1].children.length],
+      clipFlag: meta.layersTree[1].children[1].clipped,
+      maskKey: String(meta.layersTree[1].children[0].mask).startsWith('layer-'),
+      maskBytes: Object.keys(files).some(k => k.startsWith('masks/layer-')),
+    };
+  });
+  expect(result.before).toEqual({ inside: [0, 255, 255, 255], maskedOut: [0, 0, 0, 0], far: [0, 0, 0, 0] });
+  expect(result.after).toEqual(result.before);
+  expect(result.names).toEqual(['Background', 'SET', 'ART', 'OVER']);
+  expect(result.parentIsGroup).toBe(true);
+  expect(result.artMasked).toBe(true);
+  expect(result.overClipped).toBe(true);
+  expect(result.metaVersion).toBe(3);
+  expect(result.treeShape).toEqual([2, 'group', 2]);
+  expect(result.clipFlag).toBe(true);
+  expect(result.maskKey).toBe(true);
+  expect(result.maskBytes).toBe(true);
+});
+
+test('treeless documents still serialize as v2 bytes', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    const io = await import('/js/io.js');
+    app.attachDoc(new Doc(64, 64, { name: 'FLAT' }));
+    app.doc.addLayer(null, 'EXTRA');
+    const files = await io.serializeDoc(app.doc);
+    const meta = JSON.parse(new TextDecoder().decode(files['doc.json']));
+    return {
+      version: meta.version,
+      flatLayers: meta.layers?.length ?? null,
+      hasTree: 'layersTree' in meta,
+      layerMaskFiles: Object.keys(files).filter(k => k.startsWith('masks/layer-')).length,
+    };
+  });
+  expect(result).toEqual({ version: 2, flatLayers: 2, hasTree: false, layerMaskFiles: 0 });
+});
+
 test('v1.0-v1.4 project metadata without newer fields remains compatible', async ({ page }) => {
   await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
   const result = await page.evaluate(async () => {

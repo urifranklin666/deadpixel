@@ -28,6 +28,7 @@ class App {
     this.pointerInView = false;
     this.spaceDown = false;
     this.transforming = false;
+    this.maskTarget = false; // editing the active layer's mask instead of its pixels
     this.recording = null;
     this.lastFilter = null;
     this.installPrompt = null;
@@ -45,6 +46,7 @@ class App {
   /* ------------------------------ doc ------------------------------ */
   attachDoc(doc) {
     this.doc = doc;
+    this.setMaskTarget(false);
     doc.effectProcessor = (canvas, effects, seed, cache) => processSignalStack(canvas, doc.effectsWithMasks(effects), seed, cache);
     doc.effectProcessorAsync = (canvas, effects, seed, cache) => processSignalStackAsync(canvas, doc.effectsWithMasks(effects), seed, cache);
     let processingJobs = 0;
@@ -176,9 +178,9 @@ class App {
     const [x0, y0] = this.docToScreen(0, 0);
     const w = D.width * zoom, h = D.height * zoom;
     ctx.save();
-    ctx.shadowColor = 'rgba(255,34,51,.18)';
+    ctx.shadowColor = 'rgba(0,0,0,.45)';
     ctx.shadowBlur = 40;
-    ctx.fillStyle = '#0a0708';
+    ctx.fillStyle = '#c8c8c8';
     ctx.fillRect(x0, y0, w, h);
     ctx.restore();
     ctx.save();
@@ -186,9 +188,9 @@ class App {
     ctx.rect(x0, y0, w, h);
     ctx.clip();
     const cs = 8;
-    ctx.fillStyle = '#141011';
+    ctx.fillStyle = '#ffffff';
     ctx.fillRect(x0, y0, w, h);
-    ctx.fillStyle = '#1d1718';
+    ctx.fillStyle = '#cccccc';
     const startX = Math.floor(-x0 / cs) * cs;
     for (let yy = 0; yy < h + cs; yy += cs) {
       for (let xx = ((yy / cs) % 2) * cs; xx < w + cs; xx += cs * 2) {
@@ -204,6 +206,13 @@ class App {
     if (this.maskPaint?.canvas) {
       ctx.save(); ctx.globalAlpha = .42; ctx.globalCompositeOperation = 'screen'; ctx.drawImage(this.maskPaint.canvas, 0, 0); ctx.restore();
     }
+    // layer-mask editing overlay (rubylith-style tint of the mask itself)
+    if (this.maskTarget) {
+      const overlay = this._maskOverlay(D);
+      if (overlay) {
+        ctx.save(); ctx.globalAlpha = .35; ctx.globalCompositeOperation = 'screen'; ctx.drawImage(overlay, 0, 0); ctx.restore();
+      }
+    }
     // live stroke preview
     const stroke = this.tool?.previewStroke?.();
     if (stroke && stroke.layer === D.activeLayer) {
@@ -213,7 +222,7 @@ class App {
     ctx.restore();
 
     // border
-    ctx.strokeStyle = 'rgba(255,34,51,.4)';
+    ctx.strokeStyle = '#3a3a3a';
     ctx.lineWidth = 1;
     ctx.strokeRect(x0 - .5, y0 - .5, w + 1, h + 1);
 
@@ -295,6 +304,32 @@ class App {
     UI.reflectTool(this);
     UI.buildOptionsBar(this);
     this.requestRender();
+  }
+
+  /* ------------------------------ mask editing ------------------------------ */
+  /* target the active layer's mask with the brush family. Validates on every
+     call, so callers can pass the raw intent and stale requests are ignored. */
+  setMaskTarget(on) {
+    const l = this.doc?.activeLayer;
+    const target = !!(on && l && l.mask && !l.locked && l.maskEnabled);
+    if (target === this.maskTarget && this._maskChipInit) return;
+    this._maskChipInit = true;
+    this.maskTarget = target;
+    document.body.classList.toggle('mask-edit', target);
+    UI.buildOptionsBar(this);
+    this.refreshLayers?.();
+    this.requestRender();
+  }
+  _maskOverlay(D) {
+    const l = D.activeLayer;
+    if (!l?.mask || !l.maskEnabled) return null;
+    const c = makeCanvas(D.width, D.height);
+    const cctx = c.getContext('2d');
+    cctx.drawImage(l.mask, 0, 0);
+    cctx.globalCompositeOperation = 'source-in';
+    cctx.fillStyle = '#ff3355';
+    cctx.fillRect(0, 0, c.width, c.height);
+    return c;
   }
 
   /* ------------------------------ color ------------------------------ */
@@ -380,7 +415,7 @@ class App {
     // re-render text layers using it
     if (this.doc) {
       let touched = false;
-      for (const l of this.doc.layers) {
+      for (const l of this.doc.flatLayers) {
         if (l.type === 'text' && l.t.family === family) { l.render(); touched = true; }
       }
       if (touched) this.doc.changed();
@@ -774,7 +809,10 @@ class App {
     const D = this.doc;
     const l = D.activeLayer;
     if (!l || l.locked) return;
-    if (l.type === 'text') {
+    if (l.type === 'group') {
+      D.recordTranslate('Nudge', l.id, dx, dy);
+      D.translateNode(l.id, dx, dy);
+    } else if (l.type === 'text') {
       D.withLayerSnapshot('Nudge', l, () => { l.t.x += dx; l.t.y += dy; l.render(); });
     } else {
       D.withLayerSnapshot('Nudge', l, () => {

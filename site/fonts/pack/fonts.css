@@ -11,6 +11,17 @@
 @font-face { font-family: "Rubik Glitch"; src: url("rubik-glitch.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Rye"; src: url("rye.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Six Caps"; src: url("six-caps.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Freckle Face"; src: url("freckle-face.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Burned"; src: url("rubik-burned.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Dirt"; src: url("rubik-dirt.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Distressed"; src: url("rubik-distressed.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Marker Hatch"; src: url("rubik-marker-hatch.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Microbe"; src: url("rubik-microbe.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Puddles"; src: url("rubik-puddles.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Spray Paint"; src: url("rubik-spray-paint.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Storm"; src: url("rubik-storm.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Vinyl"; src: url("rubik-vinyl.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Underdog"; src: url("underdog.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Creepster"; src: url("creepster.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Eater"; src: url("eater.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Metal Mania"; src: url("metal-mania.woff2") format("woff2"); font-weight: 400; font-display: swap; }
@@ -23,6 +34,18 @@
 @font-face { font-family: "Xanh Mono"; src: url("xanh-mono.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Press Start 2P"; src: url("press-start-2p.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Silkscreen"; src: url("silkscreen.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Barrio"; src: url("barrio.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Frijole"; src: url("frijole.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Londrina Sketch"; src: url("londrina-sketch.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "New Rocker"; src: url("new-rocker.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Plaster"; src: url("plaster.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rock Salt"; src: url("rock-salt.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Beastly"; src: url("rubik-beastly.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Glitch Pop"; src: url("rubik-glitch-pop.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Rubik Wet Paint"; src: url("rubik-wet-paint.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Sedgwick Ave Display"; src: url("sedgwick-ave-display.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Trade Winds"; src: url("trade-winds.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Wallpoet"; src: url("wallpoet.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Archivo"; src: url("archivo.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Barlow Condensed"; src: url("barlow-condensed.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Inter"; src: url("inter.woff2") format("woff2"); font-weight: 400; font-display: swap; }
@@ -40,4 +63,11 @@
 @font-face { font-family: "Playfair Display"; src: url("playfair-display.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Alfa Slab One"; src: url("alfa-slab-one.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Ultra"; src: url("ultra.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Averia Serif Libre"; src: url("averia-serif-libre.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Courier Prime"; src: url("courier-prime.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Cousine"; src: url("cousine.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Cutive Mono"; src: url("cutive-mono.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Nova Mono"; src: url("nova-mono.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Share Tech Mono"; src: url("share-tech-mono.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Special Elite"; src: url("special-elite.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Syne Mono"; src: url("syne-mono.woff2") format("woff2"); font-weight: 400; font-display: swap; }

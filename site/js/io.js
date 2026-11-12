@@ -1,12 +1,15 @@
 /* DEADPIXEL io — .dpx project format (zip), export, import, autosave.
-   .dpx = zip{ doc.json, layers/<id>.png } — fflate global from vendor. */
+   .dpx = zip{ doc.json, layers/<id>.png, masks/<id>.png } — fflate global from vendor.
+   Format v3 stores a layer tree (groups, layer masks, clipping); documents that use
+   none of those features still serialize as v2 for maximum compatibility. */
 
-import { Doc, Layer, TextLayer, makeCanvas } from './engine.js';
+import { Doc, Layer, TextLayer, GroupLayer, makeCanvas, flattenLayers, MAX_TREE_DEPTH } from './engine.js';
 
-const FORMAT_VERSION = 2;
+const FORMAT_VERSION = 3;
 const MAX_DIMENSION = 32768;
 const MAX_PIXELS = 128 * 1024 * 1024;
 const MAX_LAYERS = 256;
+const VALID_NODE_TYPES = ['raster', 'text', 'group'];
 
 function canvasToPngBytes(canvas) {
   return new Promise((resolve, reject) => {
@@ -65,6 +68,12 @@ export function validateProjectMeta(meta) {
       width > MAX_DIMENSION || height > MAX_DIMENSION || width * height > MAX_PIXELS) {
     throw new Error('invalid or oversized project dimensions');
   }
+  if (meta.version >= 3) {
+    if (!Array.isArray(meta.layersTree)) throw new Error('invalid or oversized layer list');
+    const counter = { n: 0 };
+    validateNodes(meta.layersTree, 0, counter);
+    return meta;
+  }
   if (!Array.isArray(meta.layers) || meta.layers.length > MAX_LAYERS) {
     throw new Error('invalid or oversized layer list');
   }
@@ -76,9 +85,127 @@ export function validateProjectMeta(meta) {
   return meta;
 }
 
+function validateNodes(nodes, depth, counter) {
+  if (depth > MAX_TREE_DEPTH) throw new Error('invalid or oversized layer list');
+  for (const node of nodes) {
+    if (!node || !VALID_NODE_TYPES.includes(node.type) || typeof node.id !== 'string') {
+      throw new Error('invalid layer metadata');
+    }
+    if (++counter.n > MAX_LAYERS) throw new Error('invalid or oversized layer list');
+    if (node.children != null) {
+      if (!Array.isArray(node.children)) throw new Error('invalid layer metadata');
+      validateNodes(node.children, depth + 1, counter);
+    }
+  }
+}
+
+/* alpha-coverage of a grayscale mask canvas, encoded like signal masks */
+async function encodeMaskPng(mask) {
+  const { width, height } = mask;
+  const canvas = makeCanvas(width, height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(mask, 0, 0);
+  const rgba = ctx.getImageData(0, 0, width, height).data;
+  const out = makeCanvas(width, height);
+  const octx = out.getContext('2d');
+  const image = octx.createImageData(width, height);
+  for (let i = 0; i < width * height; i++) {
+    // mask coverage stored in alpha; tint magenta so the png stays legible
+    image.data[i * 4] = 255; image.data[i * 4 + 1] = 34; image.data[i * 4 + 2] = 51;
+    image.data[i * 4 + 3] = rgba[i * 4 + 3];
+  }
+  octx.putImageData(image, 0, 0);
+  return canvasToPngBytesAsync(out);
+}
+
+/* rebuild a grayscale mask canvas (white + alpha coverage) from a decoded png */
+function decodeMaskCanvas(img, width, height) {
+  const canvas = makeCanvas(width, height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  const rgba = ctx.getImageData(0, 0, width, height).data;
+  const out = makeCanvas(width, height);
+  const octx = out.getContext('2d');
+  const image = octx.createImageData(width, height);
+  for (let i = 0; i < width * height; i++) {
+    image.data[i * 4] = image.data[i * 4 + 1] = image.data[i * 4 + 2] = 255;
+    image.data[i * 4 + 3] = rgba[i * 4 + 3];
+  }
+  octx.putImageData(image, 0, 0);
+  return canvas;
+}
+
+const usesTreeFeatures = (doc) =>
+  doc.layers.some(l => l.type === 'group') ||
+  flattenLayers(doc.layers).some(l => l.mask || l.clipped);
+
+/* shared per-node serialization (raster image bytes, text props) */
+async function serializeNodeFile(doc, l, options, files) {
+  let bytes = options.incremental ? autosaveLayerCache.get(l) : null;
+  if (!bytes || bytes.revision !== l.revision) {
+    bytes = { revision: l.revision, data: await canvasToPngBytesAsync(l.canvas) };
+    if (options.incremental) autosaveLayerCache.set(l, bytes);
+  }
+  files['layers/' + l.id + '.png'] = bytes.data;
+}
+
 export async function serializeDoc(doc, options = {}) {
+  if (!usesTreeFeatures(doc)) return serializeDocV2(doc, options);
+
   const meta = {
-    app: 'DEADPIXEL', version: FORMAT_VERSION,
+    app: 'DEADPIXEL', version: 3,
+    name: doc.name, width: doc.width, height: doc.height,
+    activeId: doc._activeId ?? null,
+    effects: doc.effects || [],
+    signalSeed: doc.signalSeed >>> 0,
+    masks: [],
+    layersTree: [],
+  };
+  const files = {};
+  for (const [id, alpha] of doc.signalMasks || []) {
+    const canvas = makeCanvas(doc.width, doc.height), ctx = canvas.getContext('2d');
+    const image = ctx.createImageData(doc.width, doc.height);
+    for (let i = 0; i < alpha.length; i++) image.data.set([255, 255, 255, alpha[i]], i * 4);
+    ctx.putImageData(image, 0, 0);
+    files['masks/' + id + '.png'] = await canvasToPngBytesAsync(canvas);
+    meta.masks.push(id);
+  }
+  const walk = async (list) => {
+    const nodes = [];
+    for (const l of list) {
+      const entry = {
+        id: l.id, name: l.name, type: l.type,
+        visible: l.visible, opacity: l.opacity, blend: l.blend, locked: l.locked,
+        clipped: !!l.clipped,
+        effects: l.effects || [], signalSeed: l.signalSeed >>> 0,
+      };
+      if (l.type === 'group') {
+        entry.expanded = !!l.expanded;
+        entry.children = await walk(l.children);
+      } else if (l.type === 'text') {
+        entry.text = { ...l.t };
+      } else {
+        await serializeNodeFile(doc, l, options, files);
+      }
+      if (l.mask) {
+        const key = 'layer-' + l.id;
+        files['masks/' + key + '.png'] = await encodeMaskPng(l.mask);
+        entry.mask = key;
+        entry.maskEnabled = l.maskEnabled !== false;
+      }
+      nodes.push(entry);
+    }
+    return nodes;
+  };
+  meta.layersTree = await walk(doc.layers);
+  files['doc.json'] = new TextEncoder().encode(JSON.stringify(meta));
+  return files;
+}
+
+/* legacy flat serializer — v2 layout, unchanged since 1.5 */
+async function serializeDocV2(doc, options = {}) {
+  const meta = {
+    app: 'DEADPIXEL', version: 2,
     name: doc.name, width: doc.width, height: doc.height,
     activeIndex: doc.activeIndex,
     effects: doc.effects || [],
@@ -102,14 +229,7 @@ export async function serializeDoc(doc, options = {}) {
       effects: l.effects || [], signalSeed: l.signalSeed >>> 0,
     };
     if (l.type === 'text') entry.text = { ...l.t };
-    else {
-      let bytes = options.incremental ? autosaveLayerCache.get(l) : null;
-      if (!bytes || bytes.revision !== l.revision) {
-        bytes = { revision: l.revision, data: await canvasToPngBytesAsync(l.canvas) };
-        if (options.incremental) autosaveLayerCache.set(l, bytes);
-      }
-      files['layers/' + l.id + '.png'] = bytes.data;
-    }
+    else await serializeNodeFile(doc, l, options, files);
     meta.layers.push(entry);
   }
   files['doc.json'] = new TextEncoder().encode(JSON.stringify(meta));
@@ -196,33 +316,76 @@ export async function docFromFiles(files) {
   const doc = new Doc(meta.width, meta.height, { name: meta.name, bg: 'transparent' });
   for (const id of Array.isArray(meta.masks) ? meta.masks : []) {
     const bytes = files['masks/' + id + '.png']; if (!bytes) continue;
-    const img = await loadImageFromBytes(bytes), canvas = makeCanvas(meta.width, meta.height), ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(img, 0, 0); const rgba = ctx.getImageData(0, 0, meta.width, meta.height).data;
+    const img = await loadImageFromBytes(bytes);
+    const ctx = makeCanvas(meta.width, meta.height).getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    const rgba = ctx.getImageData(0, 0, meta.width, meta.height).data;
     const alpha = new Uint8ClampedArray(meta.width * meta.height);
     for (let i = 0; i < alpha.length; i++) alpha[i] = rgba[i * 4 + 3];
     doc.signalMasks.set(id, alpha);
   }
   doc.layers = [];
-  for (const le of meta.layers) {
-    let layer;
-    if (le.type === 'text') {
-      layer = new TextLayer(meta.width, meta.height, { name: le.name, t: le.text });
-    } else {
-      layer = new Layer(meta.width, meta.height, le.name);
-      const bytes = files['layers/' + le.id + '.png'];
-      if (bytes) {
-        const img = await loadImageFromBytes(bytes);
-        layer.ctx.drawImage(img, 0, 0);
-      }
-    }
+  const applyCommon = (layer, le) => {
     layer.visible = le.visible; layer.opacity = le.opacity;
     layer.blend = le.blend; layer.locked = le.locked;
     layer.effects = Array.isArray(le.effects) ? le.effects : [];
     if (Number.isFinite(le.signalSeed)) layer.signalSeed = le.signalSeed >>> 0;
-    doc.layers.push(layer);
+  };
+
+  if (meta.version >= 3) {
+    const buildNode = async (le, depth) => {
+      let layer;
+      if (le.type === 'group') {
+        layer = new GroupLayer();
+        layer.name = le.name;
+        layer.expanded = le.expanded !== false;
+        layer.children = [];
+        for (const child of le.children || []) layer.children.push(await buildNode(child, depth + 1));
+      } else if (le.type === 'text') {
+        layer = new TextLayer(meta.width, meta.height, { name: le.name, t: le.text });
+      } else {
+        layer = new Layer(meta.width, meta.height, le.name);
+        const bytes = files['layers/' + le.id + '.png'];
+        if (bytes) {
+          const img = await loadImageFromBytes(bytes);
+          layer.ctx.drawImage(img, 0, 0);
+        }
+      }
+      applyCommon(layer, le);
+      layer.clipped = !!le.clipped;
+      if (le.mask && files['masks/' + le.mask + '.png']) {
+        const img = await loadImageFromBytes(files['masks/' + le.mask + '.png']);
+        layer.mask = decodeMaskCanvas(img, meta.width, meta.height);
+        layer.maskEnabled = le.maskEnabled !== false;
+        layer.maskRevision = 1;
+      }
+      return layer;
+    };
+    for (const le of meta.layersTree) doc.layers.push(await buildNode(le, 0));
+  } else {
+    for (const le of meta.layers) {
+      let layer;
+      if (le.type === 'text') {
+        layer = new TextLayer(meta.width, meta.height, { name: le.name, t: le.text });
+      } else {
+        layer = new Layer(meta.width, meta.height, le.name);
+        const bytes = files['layers/' + le.id + '.png'];
+        if (bytes) {
+          const img = await loadImageFromBytes(bytes);
+          layer.ctx.drawImage(img, 0, 0);
+        }
+      }
+      applyCommon(layer, le);
+      doc.layers.push(layer);
+    }
   }
   if (!doc.layers.length) doc.layers.push(new Layer(meta.width, meta.height, 'Background'));
-  doc.activeIndex = Math.min(meta.activeIndex || 0, doc.layers.length - 1);
+  if (meta.version >= 3) {
+    const flat = flattenLayers(doc.layers);
+    doc._activeId = flat.find(l => l.id === meta.activeId)?.id ?? flat[flat.length - 1]?.id ?? null;
+  } else {
+    doc.activeIndex = Math.min(meta.activeIndex || 0, doc.layers.length - 1);
+  }
   doc.effects = Array.isArray(meta.effects) ? meta.effects : [];
   if (Number.isFinite(meta.signalSeed)) doc.signalSeed = meta.signalSeed >>> 0;
   doc.dirty = false;

@@ -7,7 +7,7 @@ import { FILTERS, filterById, defaultParams, applyFilterToLayer, applyFilterToLa
 import { saveProjectFile, openDpx, exportDoc, downloadBlob, loadImageFile, docFromImage } from './io.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
-export const APP_VERSION = '1.7.0';
+export const APP_VERSION = '1.8.0';
 const el = (tag, cls, html) => {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -295,10 +295,10 @@ async function exportDialog(app, format) {
 function aboutDialog() {
   dialog('ABOUT', (body) => {
     body.appendChild(el('div', 'about-hero', 'DEAD<em>PIXEL</em>'));
-    body.appendChild(el('div', 'about-osd', 'RASTER SURGERY SUITE · v' + APP_VERSION));
+    body.appendChild(el('div', 'about-osd', 'LOCAL-FIRST IMAGE EDITOR · v' + APP_VERSION));
     body.appendChild(el('div', 'dlg-note',
-      'A full-blooded image editor running entirely in your browser. Nothing you make here ever leaves your machine — no uploads, no accounts, no telemetry. Just you and the pixels.<br><br>' +
-      'A transmission from <a href="https://deadplug.digital" target="_blank" rel="noopener">deadplug.digital</a> · CH.404'));
+      'A full-blooded editor running entirely in your browser — layer groups, masks, clipping masks and blend modes included. Nothing you make here ever leaves your machine — no uploads, no accounts, no telemetry. Just you and the pixels.<br><br>' +
+      'By <a href="https://deadplug.digital" target="_blank" rel="noopener">deadplug.digital</a> · CH.404'));
   }, [{ label: 'Close', primary: true, value: () => true }]);
 }
 function shortcutsDialog() {
@@ -306,11 +306,12 @@ function shortcutsDialog() {
     ['V', 'Move'], ['M', 'Marquee'], ['L', 'Lasso'], ['W', 'Magic wand'], ['Q', 'Select by color'], ['C', 'Crop'],
     ['I', 'Eyedropper'], ['B', 'Brush'], ['N', 'Pencil'], ['E', 'Eraser'], ['S', 'Clone stamp'],
     ['U', 'Smudge'], ['G', 'Fill / Gradient'], ['P', 'Shape'], ['K', 'Stamp'], ['T', 'Text'],
-    ['H', 'Hand'], ['Z', 'Zoom'], ['X', 'Swap colors'], ['[ ]', 'Brush size'],
+    ['H', 'Hand'], ['Z', 'Zoom'], ['X', 'Swap colors / mask fg'], ['[ ]', 'Brush size'],
     ['Space+drag', 'Pan'], ['Ctrl+Z / Ctrl+Shift+Z', 'Undo / Redo'],
     ['Ctrl+T', 'Free transform'], ['Ctrl+A / Ctrl+D', 'Select all / Deselect'],
     ['Ctrl+Shift+I', 'Invert selection'], ['Ctrl+J', 'Duplicate layer'],
-    ['Ctrl+E', 'Merge down'], ['Ctrl+F', 'Repeat last filter'],
+    ['Ctrl+E', 'Merge down / merge group'], ['Ctrl+F', 'Repeat last filter'],
+    ['Ctrl+G', 'Group layers'], ['Ctrl+Alt+G', 'Create / release clipping mask'],
     ['Ctrl+S', 'Save .dpx'], ['Ctrl+O', 'Open'], ['Ctrl+Shift+E', 'Export PNG'],
     ['Ctrl+= / Ctrl+-', 'Zoom in / out'], ['Ctrl+0 / Ctrl+1', 'Fit / 100%'],
     ['Del', 'Clear selection'], ['Ctrl+V', 'Paste image'],
@@ -351,11 +352,21 @@ function windowsDialog(app) {
 
 function diagnostics(app) {
   const D = app.doc;
+  const flat = D?.flatLayers || [];
   return {
     generatedAt: new Date().toISOString(), app: 'DEADPIXEL', version: APP_VERSION,
     runtime: { userAgent: navigator.userAgent, language: navigator.language, online: navigator.onLine, deviceMemory: navigator.deviceMemory || null, hardwareConcurrency: navigator.hardwareConcurrency || null },
     capabilities: { workers: typeof Worker !== 'undefined', fileSystemAccess: 'showOpenFilePicker' in globalThis, offscreenCanvas: typeof OffscreenCanvas !== 'undefined', webGL2: !!document.createElement('canvas').getContext('webgl2') },
-    document: D ? { width: D.width, height: D.height, layers: D.layers.length, documentModules: D.effects.length, layerModules: D.layers.reduce((n, layer) => n + (layer.effects?.length || 0), 0), masks: D.signalMasks.size, historyEntries: D.history.entries.length, historyBytes: D.history.bytes } : null,
+    document: D ? {
+      width: D.width, height: D.height,
+      layers: flat.filter(l => l.type !== 'group').length,
+      groups: flat.filter(l => l.type === 'group').length,
+      documentModules: D.effects.length,
+      layerModules: flat.reduce((n, layer) => n + (layer.effects?.length || 0), 0),
+      layerMasks: flat.filter(l => l.mask).length,
+      signalMasks: D.signalMasks.size,
+      historyEntries: D.history.entries.length, historyBytes: D.history.bytes,
+    } : null,
     processing: { ...processingStats },
   };
 }
@@ -451,11 +462,43 @@ export function buildCommands(app) {
     'layer.new': { label: 'New Layer', key: 'Ctrl+Shift+N', run: needDoc(() => D().addLayer()) },
     'layer.dupe': { label: 'Duplicate Layer', key: 'Ctrl+J', run: needDoc(() => D().duplicateLayer()) },
     'layer.delete': { label: 'Delete Layer', key: null, run: needDoc(() => D().removeLayer()) },
+    'layer.up': { label: 'Move Layer Up', key: null, run: needDoc(() => D().moveWithinSiblings(D()._activeId, 1)) },
+    'layer.down': { label: 'Move Layer Down', key: null, run: needDoc(() => D().moveWithinSiblings(D()._activeId, -1)) },
+    'layer.group': { label: 'Group Layers', key: 'Ctrl+G', run: needDoc(() => D().groupFromActive()) },
+    'layer.clip': { label: 'Create Clipping Mask', key: 'Ctrl+Alt+G', run: needDoc(() => D().setClipped()) },
     'layer.merge': { label: 'Merge Down', key: 'Ctrl+E', run: needDoc(() => D().mergeDown()) },
+    'layer.rasterizegroup': { label: 'Merge Group Contents', key: null, run: needDoc(() => {
+      const l = D().activeLayer;
+      if (l?.type === 'group') D().rasterizeGroup(null, 'Merge group');
+      else app.toast('SELECT A GROUP TO MERGE ITS CONTENTS', true);
+    })},
     'layer.flatten': { label: 'Flatten Image', key: null, run: needDoc(() => D().flatten()) },
     'layer.rasterize': { label: 'Rasterize Text', key: null, run: needDoc(() => D().rasterizeLayer()) },
-    'layer.up': { label: 'Move Layer Up', key: null, run: needDoc(() => D().moveLayer(D().activeIndex, D().activeIndex + 1)) },
-    'layer.down': { label: 'Move Layer Down', key: null, run: needDoc(() => D().moveLayer(D().activeIndex, D().activeIndex - 1)) },
+
+    'layer.maskreveal': { label: 'Layer Mask ▸ Reveal All', key: null, run: needDoc(() => { D().addLayerMask(null, 'reveal-all'); app.setMaskTarget(true); }) },
+    'layer.maskhide': { label: 'Layer Mask ▸ Hide All', key: null, run: needDoc(() => { D().addLayerMask(null, 'hide-all'); app.setMaskTarget(true); }) },
+    'layer.maskfromsel': { label: 'Layer Mask ▸ Reveal Selection', key: null, run: needDoc(() => {
+      if (!D().selection) { app.toast('NO SELECTION — REVEALING ALL', true); }
+      D().addLayerMask(null, 'reveal-sel', 'Reveal-selection mask');
+      app.setMaskTarget(true);
+    })},
+    'layer.maskhidefromsel': { label: 'Layer Mask ▸ Hide Selection', key: null, run: needDoc(() => {
+      if (!D().selection) { app.toast('NO SELECTION — HIDING ALL', true); }
+      D().addLayerMask(null, 'hide-sel', 'Hide-selection mask');
+      app.setMaskTarget(true);
+    })},
+    'layer.masktoggle': { label: 'Layer Mask ▸ Disable / Enable', key: null, run: needDoc(() => { D().toggleLayerMaskEnabled(); app.setMaskTarget(app.maskTarget); }) },
+    'layer.maskapply': { label: 'Layer Mask ▸ Apply', key: null, run: needDoc(() => {
+      const l = D().activeLayer;
+      if (!l?.mask) { app.toast('THIS LAYER HAS NO MASK', true); return; }
+      D().deleteLayerMask(null, true, 'Apply mask');
+      app.setMaskTarget(false);
+    })},
+    'layer.maskdelete': { label: 'Layer Mask ▸ Delete', key: null, run: needDoc(() => {
+      if (!D().activeLayer?.mask) { app.toast('THIS LAYER HAS NO MASK', true); return; }
+      D().deleteLayerMask(null, false);
+      app.setMaskTarget(false);
+    })},
 
     'select.all': { label: 'Select All', key: 'Ctrl+A', run: needDoc(() => D().selectAll()) },
     'select.none': { label: 'Deselect', key: 'Ctrl+D', run: needDoc(() => D().deselect()) },
@@ -494,7 +537,10 @@ const MENU_LAYOUT = [
   ['IMAGE', ['image.size', 'image.canvas', 'image.cropsel', null,
     { sub: 'ADJUSTMENTS', items: () => FILTERS.filter(f => f.group === 'adjust').map(f => 'fx.' + f.id) },
     null, 'image.rot90', 'image.rot270', 'image.rot180', 'image.fliph', 'image.flipv']],
-  ['LAYER', ['layer.new', 'layer.dupe', 'layer.delete', null, 'layer.merge', 'layer.flatten', 'layer.rasterize', null, 'layer.up', 'layer.down']],
+  ['LAYER', ['layer.new', 'layer.dupe', 'layer.delete', null, 'layer.up', 'layer.down', null,
+    'layer.group', 'layer.clip',
+    { sub: 'LAYER MASK', items: ['layer.maskreveal', 'layer.maskhide', 'layer.maskfromsel', 'layer.maskhidefromsel', null, 'layer.masktoggle', 'layer.maskapply', 'layer.maskdelete'] },
+    null, 'layer.merge', 'layer.rasterizegroup', 'layer.rasterize', null, 'layer.flatten']],
   ['SELECT', ['select.all', 'select.none', 'select.invert', null, 'select.bycolor']],
   ['FILTER', ['filter.repeat', null, { sub: 'ALL FILTERS', items: () => FILTERS.filter(f => f.group === 'filter').map(f => 'fx.' + f.id) }]],
   ['VIEW', ['view.zoomin', 'view.zoomout', 'view.fit', 'view.hundred', null, 'view.fullscreen']],
@@ -516,7 +562,7 @@ export function buildMenus(app) {
         sub.appendChild(el('span', 'mi-label', id.sub));
         sub.appendChild(el('span', 'mi-key', ''));
         const subDrop = el('div', 'menu-drop');
-        buildItems(subDrop, id.items());
+        buildItems(subDrop, typeof id.items === 'function' ? id.items() : id.items);
         sub.appendChild(subDrop);
         drop.appendChild(sub);
         continue;
@@ -592,6 +638,11 @@ export function buildOptionsBar(app) {
   bar.innerHTML = '';
   const tool = app.tool;
   if (!tool) return;
+
+  if (app.maskTarget) {
+    bar.appendChild(el('span', 'opt-chip',
+      '⬒ LAYER MASK · light fg / brush REVEALS · dark fg or eraser HIDES · click the layer thumbnail to leave'));
+  }
 
   const title = el('span', 'opt-label', tool.name);
   title.style.color = 'var(--red)';
@@ -698,12 +749,20 @@ export function buildOptionsBar(app) {
       g.appendChild(el('span', 'opt-label', 'Font'));
       const sel = el('select');
       sel.id = 'font-select';
+      const groups = {};
       for (const f of app.fonts) {
+        const cat = f.category || 'other';
+        if (!groups[cat]) {
+          const grp = document.createElement('optgroup');
+          grp.label = cat.toUpperCase();
+          groups[cat] = grp;
+          sel.appendChild(grp);
+        }
         const o = el('option', null, f.family);
         o.value = f.family;
         o.style.fontFamily = `"${f.family}"`;
         o.style.fontSize = '15px';
-        sel.appendChild(o);
+        groups[cat].appendChild(o);
       }
       sel.value = app.text.family;
       sel.addEventListener('change', async () => {
@@ -731,7 +790,7 @@ function panelShell(id, title) {
 
 /* ---- color panel ---- */
 function buildColorPanel(app, host) {
-  const [p, body] = panelShell('color', 'BLOOD BANK');
+  const [p, body] = panelShell('color', 'COLOR PICKER');
   const sv = el('canvas'); sv.id = 'sv-square'; sv.width = 240; sv.height = 180;
   const hue = el('canvas'); hue.id = 'hue-bar'; hue.width = 240; hue.height = 14;
   const rowEl = el('div', 'color-row');
@@ -828,7 +887,7 @@ function buildColorPanel(app, host) {
 
 /* ---- brushes panel ---- */
 function buildBrushPanel(app, host) {
-  const [p, body] = panelShell('brushes', 'BRUSH MORGUE');
+  const [p, body] = panelShell('brushes', 'BRUSHES');
   const grid = el('div', 'brush-grid');
   const name = el('div', 'brush-name');
   for (const preset of BRUSH_PRESETS) {
@@ -854,7 +913,7 @@ function buildBrushPanel(app, host) {
 
 /* ---- layers panel ---- */
 function buildLayersPanel(app, host) {
-  const [p, body] = panelShell('layers', 'STRATA');
+  const [p, body] = panelShell('layers', 'LAYERS');
   const head = el('div', 'layers-head');
   const blend = el('select');
   BLEND_MODES.forEach(([v, label]) => {
@@ -868,20 +927,59 @@ function buildLayersPanel(app, host) {
   const list = el('div'); list.id = 'layers-list';
   const btns = el('div', 'panel-btns');
   const mkBtn = (label, title, fn) => {
-    const b = el('button', 'pbtn', label); b.title = title;
+    const b = el('button', 'pbtn', label); b.title = title; b.type = 'button';
     b.addEventListener('click', fn);
     btns.appendChild(b);
     return b;
   };
   mkBtn('+', 'new layer', () => app.doc?.addLayer());
+  mkBtn('▦', 'new group', () => app.doc?.addGroup());
+  const maskBtn = mkBtn('◐', 'layer mask menu', () => showMaskMenu(maskBtn));
   mkBtn('⧉', 'duplicate', () => app.doc?.duplicateLayer());
-  mkBtn('▲', 'move up', () => app.doc?.moveLayer(app.doc.activeIndex, app.doc.activeIndex + 1));
-  mkBtn('▼', 'move down', () => app.doc?.moveLayer(app.doc.activeIndex, app.doc.activeIndex - 1));
-  mkBtn('⇓', 'merge down', () => app.doc?.mergeDown());
+  mkBtn('⇓', 'merge down / merge group contents', () => {
+    const l = app.doc?.activeLayer;
+    if (app.doc && l?.type === 'group') app.doc.rasterizeGroup(null, 'Merge group');
+    else app.doc?.mergeDown();
+  });
+  mkBtn('↳', 'toggle clipping mask', () => app.doc?.setClipped());
   const delBtn = mkBtn('🗑', 'delete layer', () => app.doc?.removeLayer());
   delBtn.classList.add('danger');
   body.append(head, list, btns);
   host.appendChild(p);
+
+  /* layer-mask popover */
+  function showMaskMenu(anchor) {
+    const D = app.doc;
+    if (!D) return;
+    const pop = el('div', 'popover mask-pop');
+    const add = (label, fn) => {
+      const b = el('button', 'mask-pop-item', label); b.type = 'button';
+      b.addEventListener('click', () => { pop.remove(); document.removeEventListener('pointerdown', dismiss, true); fn(); });
+      pop.appendChild(b);
+    };
+    add('REVEAL ALL', () => { D.addLayerMask(null, 'reveal-all'); app.setMaskTarget(true); });
+    add('HIDE ALL', () => { D.addLayerMask(null, 'hide-all'); app.setMaskTarget(true); });
+    add('FROM SELECTION (REVEAL)', () => {
+      if (!D.selection) app.toast('NO SELECTION — REVEALING ALL', true);
+      D.addLayerMask(null, 'reveal-sel', 'Reveal-selection mask');
+      app.setMaskTarget(true);
+    });
+    pop.appendChild(el('div', 'menu-sep'));
+    const l = D.activeLayer;
+    if (l?.mask) {
+      add(l.maskEnabled ? 'DISABLE MASK' : 'ENABLE MASK', () => { D.toggleLayerMaskEnabled(); app.setMaskTarget(false); });
+      add('APPLY MASK', () => { D.deleteLayerMask(null, true, 'Apply mask'); app.setMaskTarget(false); });
+      add('DELETE MASK', () => { D.deleteLayerMask(null, false); app.setMaskTarget(false); });
+    } else {
+      pop.appendChild(el('div', 'mask-pop-item dim', 'no mask on the active layer'));
+    }
+    document.body.appendChild(pop);
+    const r = anchor.getBoundingClientRect();
+    pop.style.left = Math.min(r.left, innerWidth - pop.offsetWidth - 10) + 'px';
+    pop.style.top = (r.bottom + 6) + 'px';
+    const dismiss = (e) => { if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('pointerdown', dismiss, true); } };
+    setTimeout(() => document.addEventListener('pointerdown', dismiss, true));
+  }
 
   blend.addEventListener('change', () => {
     const l = app.doc?.activeLayer;
@@ -897,84 +995,179 @@ function buildLayersPanel(app, host) {
     app.doc.changed();
   });
 
-  let dragFrom = null;
+  /* ---------- tree rendering (top of stack first) ---------- */
+  let dragId = null;
+
+  const selectNode = (node) => {
+    const D = app.doc;
+    D.activeIndex = D.flatLayers.findIndex(x => x.id === node.id);
+    app.setMaskTarget(false);
+    D.changed();
+  };
+
+  const drawCanvasThumb = (tc, source) => {
+    const D = app.doc;
+    const tctx = tc.getContext('2d');
+    tctx.clearRect(0, 0, tc.width, tc.height);
+    const scale = Math.min(tc.width / D.width, tc.height / D.height);
+    tctx.imageSmoothingQuality = 'low';
+    tctx.drawImage(source, (tc.width - D.width * scale) / 2, (tc.height - D.height * scale) / 2, D.width * scale, D.height * scale);
+  };
+
+  /* reparent on drop: above/below a sibling, or into a group (middle zone) */
+  const reparentDrop = (dragId, target, zone) => {
+    const D = app.doc;
+    if (dragId === target.id) return;
+    const locT = D.locate(target.id);
+    const locD = D.locate(dragId);
+    if (!locT || !locD) return;
+    if (zone === 'into') {
+      if (target.type !== 'group') return;
+      if (D.isDescendantOf(target.id, dragId)) { app.toast("CAN'T NEST A GROUP INSIDE ITSELF", true); return; }
+      const g = D.findLayer(target.id);
+      g.expanded = true;
+      D.reparent(dragId, target.id, g.children.length, 'Move into group');
+      return;
+    }
+    const sameList = locT.list === locD.list;
+    // insertion index refers to the array after the drag node is removed
+    const ti = sameList && locD.index < locT.index ? locT.index - 1 : locT.index;
+    if (sameList) {
+      if (zone === 'above' && ti + 1 === locD.index) return;
+      if (zone === 'below' && ti === locD.index) return;
+    }
+    // visually above a row = deeper in the stack list; below = shallower
+    const parentId = locT.parent ? locT.parent.id : null;
+    D.reparent(dragId, parentId, zone === 'above' ? ti + 1 : ti, 'Reorder layer');
+  };
+
+  const renderRow = (node, depth) => {
+    const D = app.doc;
+    const isGroup = node.type === 'group';
+    const active = D.activeLayer === node;
+    const rowE = el('div', 'layer-row' + (active ? ' on' : '') + (isGroup ? ' group' : ''));
+    rowE.draggable = true;
+    rowE.dataset.id = node.id;
+    rowE.style.setProperty('--depth', depth);
+
+    if (isGroup) {
+      const disc = el('button', 'layer-disc' + (node.expanded ? ' open' : ''), node.expanded ? '▾' : '▸');
+      disc.type = 'button'; disc.title = node.expanded ? 'collapse group' : 'expand group';
+      disc.addEventListener('click', (e) => { e.stopPropagation(); node.expanded = !node.expanded; D.changed(); });
+      rowE.appendChild(disc);
+    }
+    const eye = el('button', 'layer-eye' + (node.visible ? '' : ' off'), node.visible ? '👁' : '—');
+    eye.type = 'button'; eye.title = 'toggle visibility';
+    eye.addEventListener('click', (e) => { e.stopPropagation(); node.visible = !node.visible; D.changed(); });
+    rowE.appendChild(eye);
+
+    const thumb = el('button', 'layer-thumb' + (isGroup ? ' folder' : '')); thumb.type = 'button';
+    if (isGroup) {
+      thumb.title = `${node.children.length} layer${node.children.length === 1 ? '' : 's'} in group — drop layers here`;
+      thumb.textContent = '▦';
+    } else {
+      const tc = el('canvas'); tc.width = 40; tc.height = 30;
+      drawCanvasThumb(tc, node.canvas);
+      thumb.title = 'click to edit layer pixels';
+      thumb.appendChild(tc);
+      thumb.addEventListener('click', (e) => { e.stopPropagation(); selectNode(node); });
+    }
+    rowE.appendChild(thumb);
+
+    if (node.mask) {
+      const mt = el('button', 'mask-thumb' + (app.maskTarget && active ? ' on' : '') + (node.maskEnabled ? '' : ' off'));
+      mt.type = 'button';
+      mt.title = node.maskEnabled ? 'click to paint this layer mask' : 'mask disabled — click thumbnail to enable editing';
+      const mc = el('canvas'); mc.width = 20; mc.height = 15;
+      const mctx = mc.getContext('2d');
+      mctx.fillStyle = '#0c0c0c'; mctx.fillRect(0, 0, mc.width, mc.height);
+      mctx.imageSmoothingQuality = 'low';
+      mctx.drawImage(node.mask, 0, 0, mc.width, mc.height);
+      mt.appendChild(mc);
+      mt.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const already = app.maskTarget && D.activeLayer === node;
+        selectNode(node);
+        app.setMaskTarget(!already);
+      });
+      rowE.appendChild(mt);
+    }
+
+    const nameE = el('div', 'layer-name', node.name);
+    nameE.title = 'double-click to rename';
+    nameE.addEventListener('dblclick', () => {
+      const inp = el('input');
+      inp.value = node.name;
+      nameE.innerHTML = '';
+      nameE.appendChild(inp);
+      inp.focus(); inp.select();
+      const done = () => { node.name = inp.value || node.name; app.refreshLayers(); };
+      inp.addEventListener('blur', done);
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); e.stopPropagation(); });
+    });
+    rowE.appendChild(nameE);
+
+    if (node.clipped) {
+      const clipTag = el('span', 'layer-clip', '↳');
+      clipTag.title = 'clipped to the layer below';
+      rowE.appendChild(clipTag);
+    }
+    const tag = el('span', 'layer-tag', node.type === 'text' ? 'T' : '');
+    if (node.type === 'text') tag.title = 'text layer';
+    rowE.appendChild(tag);
+    const lock = el('button', 'layer-lock' + (node.locked ? ' locked' : ''), node.locked ? '🔒' : '🔓');
+    lock.type = 'button'; lock.title = 'lock layer';
+    lock.addEventListener('click', (e) => {
+      e.stopPropagation();
+      node.locked = !node.locked;
+      app.refreshLayers();
+    });
+    rowE.appendChild(lock);
+
+    rowE.addEventListener('click', () => selectNode(node));
+    rowE.addEventListener('dragstart', () => { dragId = node.id; rowE.classList.add('dragging'); });
+    rowE.addEventListener('dragend', () => { dragId = null; rowE.classList.remove('dragging'); });
+    rowE.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      const r = rowE.getBoundingClientRect();
+      const ry = e.clientY - r.top;
+      const zone = isGroup
+        ? (ry < r.height * .35 ? 'above' : ry > r.height * .65 ? 'below' : 'into')
+        : (ry < r.height / 2 ? 'above' : 'below');
+      rowE.dataset.zone = zone;
+      rowE.classList.toggle('dropabove', zone === 'above');
+      rowE.classList.toggle('dropbelow', zone === 'below');
+      rowE.classList.toggle('dropinto', zone === 'into');
+    });
+    rowE.addEventListener('dragleave', () => {
+      rowE.classList.remove('dropabove', 'dropbelow', 'dropinto');
+      rowE.dataset.zone = '';
+    });
+    rowE.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const zone = rowE.dataset.zone || (isGroup ? 'into' : 'above');
+      rowE.classList.remove('dropabove', 'dropbelow', 'dropinto');
+      rowE.dataset.zone = '';
+      if (dragId) reparentDrop(dragId, node, zone);
+      dragId = null;
+    });
+    list.appendChild(rowE);
+  };
+
   app.refreshLayers = () => {
     const D = app.doc;
     list.innerHTML = '';
     if (!D) return;
     const l = D.activeLayer;
     if (l) { blend.value = l.blend; op.value = Math.round(l.opacity * 100); opv.textContent = op.value; }
-    // top layer first in UI
-    for (let i = D.layers.length - 1; i >= 0; i--) {
-      const layer = D.layers[i];
-      const rowE = el('div', 'layer-row' + (i === D.activeIndex ? ' on' : ''));
-      rowE.draggable = true;
-      rowE.dataset.idx = i;
-      const eye = el('button', 'layer-eye' + (layer.visible ? '' : ' off'), layer.visible ? '👁' : '—');
-      eye.title = 'toggle visibility';
-      eye.addEventListener('click', (e) => {
-        e.stopPropagation();
-        layer.visible = !layer.visible;
-        D.changed();
-      });
-      const thumb = el('div', 'layer-thumb');
-      const tc = el('canvas'); tc.width = 40; tc.height = 30;
-      const tctx = tc.getContext('2d');
-      const scale = Math.min(40 / D.width, 30 / D.height);
-      tctx.imageSmoothingQuality = 'low';
-      tctx.drawImage(layer.canvas, (40 - D.width * scale) / 2, (30 - D.height * scale) / 2, D.width * scale, D.height * scale);
-      thumb.appendChild(tc);
-      const nameE = el('div', 'layer-name', layer.name);
-      nameE.title = 'double-click to rename';
-      nameE.addEventListener('dblclick', () => {
-        const inp = el('input');
-        inp.value = layer.name;
-        nameE.innerHTML = '';
-        nameE.appendChild(inp);
-        inp.focus(); inp.select();
-        const done = () => { layer.name = inp.value || layer.name; app.refreshLayers(); };
-        inp.addEventListener('blur', done);
-        inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); e.stopPropagation(); });
-      });
-      const tag = el('span', 'layer-tag', layer.type === 'text' ? 'T' : '');
-      const lock = el('button', 'layer-lock' + (layer.locked ? ' locked' : ''), layer.locked ? '🔒' : '🔓');
-      lock.title = 'lock layer';
-      lock.addEventListener('click', (e) => {
-        e.stopPropagation();
-        layer.locked = !layer.locked;
-        app.refreshLayers();
-      });
-      rowE.append(eye, thumb, nameE, tag, lock);
-      rowE.addEventListener('click', () => {
-        D.activeIndex = i;
-        D.changed();
-      });
-      rowE.addEventListener('dragstart', () => { dragFrom = i; rowE.classList.add('dragging'); });
-      rowE.addEventListener('dragend', () => rowE.classList.remove('dragging'));
-      rowE.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        const r = rowE.getBoundingClientRect();
-        rowE.classList.toggle('dropabove', e.clientY < r.top + r.height / 2);
-        rowE.classList.toggle('dropbelow', e.clientY >= r.top + r.height / 2);
-      });
-      rowE.addEventListener('dragleave', () => rowE.classList.remove('dropabove', 'dropbelow'));
-      rowE.addEventListener('drop', (e) => {
-        e.preventDefault();
-        const r = rowE.getBoundingClientRect();
-        const above = e.clientY < r.top + r.height / 2; // above in UI = higher index
-        rowE.classList.remove('dropabove', 'dropbelow');
-        if (dragFrom == null) return;
-        let to = above ? i : i - 0;
-        to = above ? i : Math.max(0, i - 1 + (dragFrom < i ? 1 : 0));
-        if (dragFrom === i) return;
-        // translate: dropping above row i → position after i in array ordering
-        let target = above ? i + (dragFrom > i ? 1 : 0) : i - (dragFrom < i ? 0 : 0);
-        target = clamp(above ? (dragFrom > i ? i + 1 : i) : (dragFrom > i ? i : i - 1), 0, D.layers.length - 1);
-        D.moveLayer(dragFrom, target);
-        dragFrom = null;
-      });
-      list.appendChild(rowE);
-    }
+    const walk = (nodes, depth) => {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i];
+        renderRow(node, depth);
+        if (node.type === 'group' && node.expanded) walk(node.children, depth + 1);
+      }
+    };
+    walk(D.layers, 0);
   };
 }
 
@@ -1349,23 +1542,48 @@ function buildActionsPanel(app, host) {
 export function buildPanels(app) {
   const host = $('#panels');
   host.innerHTML = '';
-  const tabs = el('div', 'panel-tabs');
-  const editTab = el('button', 'on', 'LAYERS');
-  const signalTab = el('button', null, 'SIGNAL RACK');
-  tabs.append(editTab, signalTab); host.appendChild(tabs);
-  const editHost = el('div', 'panel-mode on'); editHost.dataset.mode = 'edit';
-  const signalHost = el('div', 'panel-mode'); signalHost.dataset.mode = 'signal';
-  host.append(editHost, signalHost);
-  const activate = (mode) => {
-    editTab.classList.toggle('on', mode === 'edit'); signalTab.classList.toggle('on', mode === 'signal');
-    editHost.classList.toggle('on', mode === 'edit'); signalHost.classList.toggle('on', mode === 'signal');
-    if (mode === 'signal') app.refreshActions?.();
+  /* two stacked tab groups, Photoshop-style: Color/Brush/Signal on top,
+     Layers/History below (the layers list is the tall one) */
+  const topTabs = el('div', 'panel-tabs');
+  const bottomTabs = el('div', 'panel-tabs');
+  host.append(topTabs, bottomTabs);
+  const labels = { color: 'COLOR', brush: 'BRUSH', signal: 'SIGNAL RACK', layers: 'LAYERS', history: 'HISTORY' };
+  const groups = {
+    top: { order: ['color', 'brush', 'signal'], tabs: {}, current: 'color' },
+    bottom: { order: ['layers', 'history'], tabs: {}, current: 'layers' },
   };
-  app.activatePanelMode = activate;
-  editTab.addEventListener('click', () => activate('edit')); signalTab.addEventListener('click', () => activate('signal'));
-  buildColorPanel(app, editHost);
-  buildBrushPanel(app, editHost);
-  buildLayersPanel(app, editHost);
-  buildHistoryPanel(app, editHost);
-  buildActionsPanel(app, signalHost);
+  const bodies = {};
+  for (const [name, g] of Object.entries(groups)) {
+    for (const mode of g.order) {
+      const tab = el('button', mode === g.current ? 'on' : null, labels[mode]);
+      tab.type = 'button';
+      const bodyEl = el('div', 'panel-mode' + (mode === g.current ? ' on' : ''));
+      bodyEl.dataset.mode = mode;
+      g.tabs[mode] = tab;
+      bodies[mode] = bodyEl;
+      tab.addEventListener('click', () => activate(name, mode));
+      host.appendChild(bodyEl);
+    }
+  }
+  topTabs.append(groups.top.tabs.color, groups.top.tabs.brush, groups.top.tabs.signal);
+  bottomTabs.append(groups.bottom.tabs.layers, groups.bottom.tabs.history);
+  const activate = (groupName, mode) => {
+    const g = groups[groupName];
+    g.current = mode;
+    for (const m of g.order) {
+      g.tabs[m].classList.toggle('on', m === mode);
+      bodies[m].classList.toggle('on', m === mode);
+    }
+    if (mode === 'signal') app.refreshActions?.();
+    if (mode === 'layers') app.refreshLayers?.();
+  };
+  app.activatePanelMode = (mode) => {
+    if (groups.top.order.includes(mode)) return activate('top', mode);
+    if (groups.bottom.order.includes(mode)) return activate('bottom', mode);
+  };
+  buildColorPanel(app, bodies.color);
+  buildBrushPanel(app, bodies.brush);
+  buildLayersPanel(app, bodies.layers);
+  buildHistoryPanel(app, bodies.history);
+  buildActionsPanel(app, bodies.signal);
 }
