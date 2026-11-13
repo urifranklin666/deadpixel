@@ -579,3 +579,265 @@ test('cached editor shell starts while offline', async ({ page, context }) => {
     await context.setOffline(false);
   }
 });
+
+/* ---------------- Phase 2: selection refining, quick mask, retouch, pen, transform ---------------- */
+
+test('feather, expand and contract reshape the selection alpha', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc, Selection } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'SEL REFINE' }));
+    const D = app.doc;
+    D.setSelection(Selection.fromRect(D.width, D.height, 20, 20, 24, 24), 'E2E seed');
+    const a = (x, y) => D.selection.mctx.getImageData(x, y, 1, 1).data[3];
+    const seed = D.selection.bounds;
+
+    D.growSelection(2); // expand
+    const expanded = D.selection.bounds;
+    const softCorner = a(18, 18), core = a(24, 24);
+
+    D.growSelection(2, true); // contract back
+    const contracted = D.selection.bounds;
+    const roundedCorner = a(20, 20);
+
+    D.featherSelection(3);
+    const feathered = D.selection.bounds; // blur spreads alpha ~±6 beyond the rect
+    const edge = a(20, 26), mid = a(32, 32), fringe = a(18, 26);
+    return { seed, expanded, contracted, feathered, softCorner, core, roundedCorner, edge, mid, fringe, label: D.history.entries[D.history.index].label };
+  });
+  expect(result.seed).toEqual({ x: 20, y: 20, w: 24, h: 24 });
+  expect(result.expanded).toEqual({ x: 18, y: 18, w: 28, h: 28 });
+  expect(result.softCorner).toBeGreaterThanOrEqual(30); // soft euclidean rim on the diagonal
+  expect(result.softCorner).toBeLessThanOrEqual(90);
+  expect(result.core).toBe(255);
+  expect(result.contracted).toEqual({ x: 20, y: 20, w: 24, h: 24 });
+  expect(result.roundedCorner).toBeGreaterThan(120); // corners round instead of squaring off
+  expect(result.roundedCorner).toBeLessThan(250);
+  expect(result.feathered).toEqual({ x: 14, y: 14, w: 36, h: 36 }); // alpha>8 tail extends ~6px each way
+  expect(result.edge).toEqual(137); // edge alpha drops to roughly half
+  expect(result.mid).toBe(255);
+  expect(result.fringe).toBeGreaterThanOrEqual(40); // soft falloff outside the original rect
+  expect(result.fringe).toBeLessThanOrEqual(130);
+  expect(result.label).toBe('Feather selection');
+});
+
+test('quick mask paints a live selection mask and bakes it on exit', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'QM TEST' }));
+    const D = app.doc;
+    app.setTool('brush');
+    app.brush.preset = 'hard-round';
+    app.brush.size = 20; app.brush.hardness = 100; app.brush.flow = 100;
+    app.color.fg = '#ffffff'; // light fg paints coverage
+    app.setQuickMask(true);
+    const chipOn = document.body.classList.contains('quick-mask');
+    const chipShown = document.querySelector('#optionsbar').textContent.includes('QUICK MASK');
+
+    const pt = (x, y) => { const [sx, sy] = app.docToScreen(x, y); return { x, y, sx, sy, pressure: 1, e: null }; };
+    app.tool.onDown(app, pt(16, 32));
+    app.tool.onMove(app, pt(32, 32));
+    app.tool.onMove(app, pt(48, 32));
+    app.tool.onUp(app);
+    const painted = app._quickMask.getContext('2d').getImageData(30, 32, 1, 1).data[3];
+
+    app.setQuickMask(false);
+    const sel = D.selection;
+    return {
+      chipOn, chipShown, painted,
+      bounds: sel?.bounds,
+      covered: sel?.mctx.getImageData(30, 32, 1, 1).data[3],
+      outside: sel?.mctx.getImageData(30, 4, 1, 1).data[3],
+      label: D.history.entries[D.history.index].label,
+      bodyClass: document.body.classList.contains('quick-mask'),
+      chipGone: !document.querySelector('#optionsbar').textContent.includes('QUICK MASK'),
+    };
+  });
+  expect(result.chipOn).toBe(true);
+  expect(result.chipShown).toBe(true);
+  expect(result.painted).toBe(255);
+  expect(result.bounds.x).toBeGreaterThanOrEqual(5); // capsule around the 16..48 sweep
+  expect(result.bounds.x).toBeLessThanOrEqual(7);
+  expect(result.bounds.y).toBeGreaterThanOrEqual(22);
+  expect(result.bounds.y).toBeLessThanOrEqual(24);
+  expect(result.bounds.w).toBeGreaterThanOrEqual(50);
+  expect(result.bounds.h).toBeGreaterThanOrEqual(18);
+  expect(result.bounds.h).toBeLessThanOrEqual(22);
+  expect(result.covered).toBe(255);
+  expect(result.outside).toBe(0);
+  expect(result.label).toBe('Quick mask');
+  expect(result.bodyClass).toBe(false);
+  expect(result.chipGone).toBe(true);
+});
+
+test('dodge, burn and sponge retouch only the pixels they dab', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'TONER TEST' }));
+    const D = app.doc, layer = D.activeLayer;
+    layer.ctx.fillStyle = '#808080'; layer.ctx.fillRect(0, 0, 64, 64); layer.revision++;
+    D.changed();
+    app.brush.size = 20; app.brush.hardness = 100; app.brush.flow = 100;
+    const pt = (x, y) => { const [sx, sy] = app.docToScreen(x, y); return { x, y, sx, sy, pressure: 1, e: null }; };
+    const px = (x, y) => { D.compose(); return Array.from(D._compoCtx.getImageData(x, y, 1, 1).data); };
+
+    app.setTool('dodge');
+    app.tool.onDown(app, pt(16, 32)); app.tool.onUp(app);
+    const dodged = px(16, 32), untouched = px(48, 32);
+
+    app.setTool('burn');
+    app.tool.onDown(app, pt(48, 32)); app.tool.onUp(app);
+    const burned = px(48, 32);
+
+    layer.ctx.fillStyle = '#ff0000'; layer.ctx.fillRect(0, 0, 64, 64); layer.revision++;
+    D.changed();
+    app.setTool('sponge'); // defaults to DESAT
+    app.tool.onDown(app, pt(32, 32)); app.tool.onUp(app);
+    return { dodged, untouched, burned, sponged: px(32, 32), label: D.history.entries[D.history.index].label };
+  });
+  expect(result.dodged).toEqual([255, 255, 255, 255]); // gray 128 through a light source full-blast dodge
+  expect(result.untouched).toEqual([128, 128, 128, 255]);
+  expect(result.burned).toEqual([0, 0, 0, 255]);
+  const [r, g, b] = result.sponged;
+  expect(r).toBeLessThan(110); // pure red desaturates toward its luminosity ≈ 54
+  expect(Math.abs(r - g)).toBeLessThan(8);
+  expect(Math.abs(g - b)).toBeLessThan(8);
+  expect(result.label).toBe('Sponge');
+});
+
+test('heal brush blends a blemish away to its local median', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'HEAL TEST' }));
+    const D = app.doc, layer = D.activeLayer;
+    layer.ctx.fillStyle = 'rgb(200,200,200)'; layer.ctx.fillRect(0, 0, 64, 64);
+    layer.ctx.fillStyle = 'rgb(20,20,20)'; layer.ctx.fillRect(30, 30, 4, 4);
+    layer.revision++; D.changed();
+    const px = (x, y) => { D.compose(); return Array.from(D._compoCtx.getImageData(x, y, 1, 1).data); };
+    const blemish = px(31, 31);
+
+    app.brush.size = 52; app.brush.hardness = 100; app.brush.flow = 100;
+    app.setTool('heal');
+    const pt = (x, y) => { const [sx, sy] = app.docToScreen(x, y); return { x, y, sx, sy, pressure: 1, e: null }; };
+    app.tool.onDown(app, pt(32, 32)); app.tool.onUp(app);
+    return { blemish, healed: px(32, 32), spot: px(31, 31), field: px(8, 8), label: D.history.entries[D.history.index].label };
+  });
+  expect(result.blemish).toEqual([20, 20, 20, 255]);
+  expect(result.healed).toEqual([200, 200, 200, 255]); // 4px spot is a minority in the 9px median window
+  expect(result.spot).toEqual([200, 200, 200, 255]);
+  expect(result.field).toEqual([200, 200, 200, 255]);
+  expect(result.label).toBe('Heal brush');
+});
+
+test('pen anchors close into a path and convert to a selection', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'PEN TEST' }));
+    const D = app.doc;
+    app.setTool('pen');
+    const pen = app.tool;
+    const pt = (x, y) => { const [sx, sy] = app.docToScreen(x, y); return { x, y, sx, sy, pressure: 1, e: null }; };
+    for (const [x, y] of [[10, 10], [50, 15], [20, 50]]) { pen.onDown(app, pt(x, y)); pen.onUp(app); }
+    const anchored = pen.pts.length;
+    pen.onDown(app, pt(10, 10)); pen.onUp(app); // click the first anchor to close
+    const closed = pen.closed;
+    pen.doAction(app, 'select');
+    return { anchored, closed, bounds: D.selection?.bounds, label: D.history.entries[D.history.index].label };
+  });
+  expect(result.anchored).toBe(3);
+  expect(result.closed).toBe(true);
+  expect(result.bounds.x).toBe(10); // triangle bbox
+  expect(result.bounds.y).toBe(10);
+  expect(result.bounds.w).toBeGreaterThanOrEqual(39);
+  expect(result.bounds.w).toBeLessThanOrEqual(41);
+  expect(result.bounds.h).toBeGreaterThanOrEqual(39);
+  expect(result.bounds.h).toBeLessThanOrEqual(41);
+  expect(result.label).toBe('Make selection');
+});
+
+test('transform SKEW shears the layer horizontally by depth', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'SKEW TEST' }));
+    const D = app.doc;
+    D.activeLayer.ctx.fillStyle = '#c04040'; D.activeLayer.ctx.fillRect(16, 16, 32, 32); D.activeLayer.revision++;
+    D.changed();
+    app.enterTransform();
+    const T = app.tool; // transformTool
+    T.state.mode = 'skew';
+    T.tx.skx = .3; // y shifts by .3 · (x − 32): box midline maps src row 32 to doc row 35.75
+    T.applyPreview(app);
+    T.doAction(app, 'apply');
+    const px = (x, y) => { D.compose(); return Array.from(D._compoCtx.getImageData(x, y, 1, 1).data); };
+    return {
+      transforming: app.transforming,
+      shifted: px(44, 36),   // src (44,32) → 32 + .3·(44−32) ≈ 35.6
+      emptied: px(44, 12),   // src column 44 top rows fall above the sheared band
+      label: D.history.entries[D.history.index].label,
+    };
+  });
+  expect(result.transforming).toBe(false);
+  expect(result.shifted).toEqual([192, 64, 64, 255]);
+  expect(result.emptied).toEqual([0, 0, 0, 0]);
+  expect(result.label).toBe('Transform');
+});
+
+test('transform DISTORT maps free corners per-triangle', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'DISTORT TEST' }));
+    const D = app.doc;
+    D.activeLayer.ctx.fillStyle = '#c04040'; D.activeLayer.ctx.fillRect(16, 16, 32, 32); D.activeLayer.revision++;
+    D.changed();
+    app.enterTransform();
+    const T = app.tool;
+    T.state.mode = 'distort';
+    T.optionChanged(app, 'mode'); // freeCorners ← box quad (TL, TR, BR, BL)
+    T.freeCorners = [{ x: 8, y: 8 }, { x: 48, y: 16 }, { x: 40, y: 48 }, { x: 16, y: 40 }];
+    T.applyPreview(app);
+    T.doAction(app, 'apply');
+    const px = (x, y) => { D.compose(); return Array.from(D._compoCtx.getImageData(x, y, 1, 1).data); };
+    return {
+      transforming: app.transforming,
+      atTL: px(12, 12),   // near the pulled TL corner, inside the dst triangle
+      mapped: px(32, 24), // tri1 centroid: samples src ≈ (37.8, 27) inside the quad
+      outside: px(10, 40), // left-bottom is outside both destination triangles
+      label: D.history.entries[D.history.index].label,
+    };
+  });
+  expect(result.transforming).toBe(false);
+  expect(result.atTL).toEqual([192, 64, 64, 255]);
+  expect(result.mapped).toEqual([192, 64, 64, 255]);
+  expect(result.outside).toEqual([0, 0, 0, 0]);
+  expect(result.label).toBe('Transform');
+});
+
+test('phase 2 tools and commands are wired into the shell', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  await expect(page.locator('[data-tool="pen"]')).toHaveAttribute('title', /PEN \(P\)/);
+  await expect(page.locator('[data-tool="heal"]')).toHaveAttribute('title', /HEAL \(J\)/);
+  const wired = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'WIRE TEST' }));
+    return { quickmaskCmd: !!app.cmd['select.quickmask'] && app.cmd['select.quickmask'].key === 'Q' };
+  });
+  expect(wired.quickmaskCmd).toBe(true);
+  await page.evaluate(() => window.deadpixel.setQuickMask(true));
+  await expect(page.locator('#optionsbar')).toContainText('QUICK MASK');
+  await page.evaluate(() => window.deadpixel.setQuickMask(false));
+  await expect(page.locator('#optionsbar')).not.toContainText('QUICK MASK');
+});

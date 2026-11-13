@@ -1,5 +1,5 @@
 {
-  "version": "1.9.0",
-  "url": "https://github.com/urifranklin666/deadpixel/releases/tag/v1.9.0",
-  "notes": ["Adjustment layers — all 11 adjust filters incl. new Vibrance, Photo Filter and Exposure", "Pass Through group blending", "Navigator panel with live viewport box", "Histogram panel (luminance + RGB)", ".dpx v4 project format (adjustment layers), fully backward compatible"]
+  "version": "2.0.0",
+  "url": "https://github.com/urifranklin666/deadpixel/releases/tag/v2.0.0",
+  "notes": ["Feather / Expand / Contract selection with exact Euclidean math", "Quick Mask (Q): paint the selection with the brush, red rubylith preview", "Transform gains SKEW and DISTORT (free 4-corner perspective) modes", "Healing Brush (J), Dodge / Burn / Sponge (O) retouch tools", "Pen tool (P): click-and-drag bezier paths, MAKE SELECTION and STROKE PATH"]
 }

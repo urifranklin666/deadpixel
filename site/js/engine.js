@@ -2,6 +2,8 @@
    Layer tree: GroupLayer nodes hold children; raster and text layers are leaves.
    Leaves can carry a nondestructive layer mask and a clipping flag. */
 
+import { blurAlpha, growAlpha } from './pixelops.js';
+
 let _uid = 1;
 export const uid = () => 'L' + (_uid++) + '_' + Date.now().toString(36);
 export const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -350,6 +352,15 @@ export class Selection {
       img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = 255;
       img.data[i * 4 + 3] = v;
     }
+    s.mctx.putImageData(img, 0, 0);
+    return s._done();
+  }
+  /* rebuild from a full RGBA block (white RGB + selection alpha), e.g. the
+     output of the pixelops feather/grow filters */
+  static fromBlock(w, h, block) {
+    const s = new Selection(w, h);
+    const img = s.mctx.createImageData(w, h);
+    img.data.set(block.subarray(0, w * h * 4));
     s.mctx.putImageData(img, 0, 0);
     return s._done();
   }
@@ -1535,6 +1546,26 @@ export class Doc extends EventTarget {
     const s = new Selection(this.width, this.height);
     s.mctx.drawImage(c, 0, 0);
     this.setSelection(s.invert(), 'Invert selection');
+  }
+  /* run a pixelops alpha filter over the selection mask and install the
+     result as a NEW selection (history-recorded). Returns false when there
+     is nothing selected so callers can toast. */
+  filterSelection(label, fn) {
+    const sel = this.selection;
+    if (!sel || sel.isEmpty) return false;
+    const w = sel.mask.width, h = sel.mask.height;
+    const img = sel.mctx.getImageData(0, 0, w, h);
+    const out = fn(img.data, w, h) || img.data;
+    this.setSelection(Selection.fromBlock(w, h, out), label);
+    return true;
+  }
+  featherSelection(px = 4) {
+    return this.filterSelection('Feather selection',
+      (data, w, h) => blurAlpha(data, w, h, clamp(Math.round(px), 1, 250), 3));
+  }
+  growSelection(px = 2, erode = false) {
+    return this.filterSelection(erode ? 'Contract selection' : 'Expand selection',
+      (data, w, h) => growAlpha(data, w, h, clamp(Math.round(px), 1, 250), !!erode));
   }
 }
 

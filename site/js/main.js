@@ -1,6 +1,6 @@
 /* DEADPIXEL main — app state, viewport, input, boot. */
 
-import { Doc, Layer, TextLayer, clamp, makeCanvas } from './engine.js';
+import { Doc, Layer, TextLayer, clamp, makeCanvas, Selection } from './engine.js';
 import { TOOLS, toolById, transformTool } from './tools.js';
 import * as UI from './ui.js';
 import { openDpx, loadImageFile, docFromImage, autosave, loadAutosaves, clearAutosave, deleteAutosave, docFromFiles, setAutosaveReporter, rememberRecentProject, listRecentProjects, fileFromRecentProject, updateRecentProject, forgetRecentProject } from './io.js';
@@ -29,6 +29,8 @@ class App {
     this.spaceDown = false;
     this.transforming = false;
     this.maskTarget = false; // editing the active layer's mask instead of its pixels
+    this.quickMask = false; // painting the selection mask (quick mask mode)
+    this._quickMask = null;
     this.recording = null;
     this.lastFilter = null;
     this.installPrompt = null;
@@ -47,6 +49,7 @@ class App {
   attachDoc(doc) {
     this.doc = doc;
     this.setMaskTarget(false);
+    this.setQuickMask(false);
     doc.effectProcessor = (canvas, effects, seed, cache) => processSignalStack(canvas, doc.effectsWithMasks(effects), seed, cache);
     doc.effectProcessorAsync = (canvas, effects, seed, cache) => processSignalStackAsync(canvas, doc.effectsWithMasks(effects), seed, cache);
     let processingJobs = 0;
@@ -219,6 +222,13 @@ class App {
         ctx.save(); ctx.globalAlpha = .35; ctx.globalCompositeOperation = 'screen'; ctx.drawImage(overlay, 0, 0); ctx.restore();
       }
     }
+    // quick-mask rubylith: red tint of the working selection mask
+    if (this.quickMask) {
+      const overlay = this._quickMaskOverlay();
+      if (overlay) {
+        ctx.save(); ctx.globalAlpha = .5; ctx.globalCompositeOperation = 'screen'; ctx.drawImage(overlay, 0, 0); ctx.restore();
+      }
+    }
     // live stroke preview
     const stroke = this.tool?.previewStroke?.();
     if (stroke && stroke.layer === D.activeLayer) {
@@ -338,6 +348,55 @@ class App {
     const c = makeCanvas(D.width, D.height);
     const cctx = c.getContext('2d');
     cctx.drawImage(l.mask, 0, 0);
+    cctx.globalCompositeOperation = 'source-in';
+    cctx.fillStyle = '#ff3355';
+    cctx.fillRect(0, 0, c.width, c.height);
+    return c;
+  }
+
+  /* ------------------------------ quick mask ------------------------------ */
+  /* selection-mask painting: enter copies the current selection into a
+     working canvas, brush/pencil/eraser paint it (live rubylith), exit
+     bakes the mask alpha into the document selection as ONE history entry */
+  setQuickMask(on) {
+    on = !!on;
+    if (on === this.quickMask) return;
+    if (on && !this.doc) return;
+    if (!on) {
+      this.quickMask = false;
+      const m = this._quickMask;
+      this._quickMask = null;
+      document.body.classList.remove('quick-mask');
+      const D = this.doc;
+      if (m && D) {
+        const d = m.getContext('2d', { willReadFrequently: true })
+          .getImageData(0, 0, D.width, D.height).data;
+        const a = new Uint8Array(D.width * D.height);
+        for (let i = 0; i < a.length; i++) a[i] = d[i * 4 + 3];
+        const sel = Selection.fromMaskData(D.width, D.height, a);
+        if (sel.isEmpty) D.deselect();
+        else D.setSelection(sel, 'Quick mask');
+      }
+    } else {
+      const D = this.doc;
+      const m = makeCanvas(D.width, D.height);
+      if (D.selection && !D.selection.isEmpty) {
+        m.getContext('2d').drawImage(D.selection.mask, 0, 0);
+      }
+      this._quickMask = m;
+      this.quickMask = true;
+      document.body.classList.add('quick-mask');
+      this.toast('QUICK MASK — PAINT WITH BRUSH · DARK FG / ERASER CARVES · Q TO EXIT');
+    }
+    this.tool = null; // force setTool below to rebuild, so the bar reflects the mode
+    this.setTool(this.prevToolId || 'brush');
+    this.requestRender();
+  }
+  _quickMaskOverlay() {
+    if (!this._quickMask) return null;
+    const c = makeCanvas(this.doc.width, this.doc.height);
+    const cctx = c.getContext('2d');
+    cctx.drawImage(this._quickMask, 0, 0);
     cctx.globalCompositeOperation = 'source-in';
     cctx.fillStyle = '#ff3355';
     cctx.fillRect(0, 0, c.width, c.height);

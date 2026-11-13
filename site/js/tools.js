@@ -5,6 +5,7 @@
 
 import { makeCanvas, copyCanvas, clamp, Selection, TextLayer, hexToRgb, rgbToHex } from './engine.js';
 import { Stroke, BRUSH_PRESETS, renderTip, STAMPS, renderStamp } from './brushes.js';
+import { medianRGB, affineForTriangle } from './pixelops.js';
 
 /* ---------- svg icons (stroke style, 24 box) ---------- */
 const I = {
@@ -20,6 +21,11 @@ const I = {
   eraser: '<path d="M8 19l-4-4c-.8-.8-.8-2 0-2.8l7-7c.8-.8 2-.8 2.8 0l4.2 4.2c.8.8.8 2 0 2.8L11 19H8zM6 21h14"/>',
   clone: '<rect x="3" y="3" width="12" height="12"/><path d="M9 21h12V9M15 15h6M15 21V15"/>',
   smudge: '<path d="M5 18c2-1 3-3 3-6 0-2 1-4 3-4s3 2 3 4c0 3 1 5 3 6M4 20h16"/>',
+  heal: '<path d="M12 3v18M3 12h18M6.5 6.5l11 11M17.5 6.5l-11 11" opacity=".45"/><circle cx="12" cy="12" r="6.2"/>',
+  pen: '<path d="M13 4l7 7-9.5 9.5L4 21l.5-6.5L14 5l-1-1zM14 5l5 5M9 15l6-6"/>',
+  dodge: '<circle cx="12" cy="12" r="4.5"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8"/>',
+  burn: '<path d="M12 21v-2.5M12 5.5V3M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8"/><path d="M8.2 13.5a3.8 3.8 0 0 0 7.6 0c0-2.1-3.8-6-3.8-6s-3.8 3.9-3.8 6z" fill="currentColor" stroke="none"/>',
+  sponge: '<rect x="4" y="6" width="16" height="13" rx="2.5"/><circle cx="9" cy="11" r="1.1"/><circle cx="15" cy="13" r="1.1"/><circle cx="11" cy="16" r=".9"/>',
   fill: '<path d="M8 3l9 9-7 7-7-7 5-5zM3 12h11M19 15s2 2.4 2 4a2 2 0 1 1-4 0c0-1.6 2-4 2-4z"/>',
   gradient: '<rect x="3" y="5" width="18" height="14"/><path d="M7 5v14M11 5v14" opacity=".6"/><path d="M15 5v14" opacity=".3"/>',
   shape: '<rect x="3" y="9" width="10" height="10"/><circle cx="16" cy="8" r="5"/>',
@@ -42,6 +48,7 @@ const brushCommonOpts = [
 function paintableLayer(app) {
   const l = app.doc?.activeLayer;
   if (!l) return null;
+  if (app.quickMask) { app.toast('QUICK MASK — ONLY BRUSH, PENCIL, ERASER PAINT THE MASK (Q TO EXIT)', true); return null; }
   if (app.maskTarget) { app.toast('MASK EDITING — USE BRUSH, PENCIL OR ERASER', true); return null; }
   if (l.locked) { app.toast('LAYER IS LOCKED', true); return null; }
   if (l.type === 'group') { app.toast("CAN'T PAINT ON A GROUP — SELECT A LAYER", true); return null; }
@@ -522,6 +529,22 @@ function paintTool(def) {
   return {
     ...def,
     onDown(app, p, e) {
+      if (app.quickMask) {
+        // brush/pencil/eraser paint the working selection mask directly
+        // (live rubylith). dark fg or the eraser carves the mask away
+        const preset = BRUSH_PRESETS.find(px => px.id === app.brush.preset);
+        this.qm = {
+          hide: this.id === 'eraser' || fgLuminance(app) < .5,
+          tip: preset?.tip || 'round',
+          spacing: preset?.spacing || .1,
+          size: app.brush.size,
+          hardness: app.brush.hardness / 100,
+          flow: clamp(app.brush.flow / 100, .02, 1),
+          last: p,
+        };
+        this.qmDab(app, p);
+        return;
+      }
       if (app.maskTarget) {
         const layer = maskPaintableLayer(app);
         if (!layer) return;
@@ -542,12 +565,42 @@ function paintTool(def) {
       this.stroke.moveTo(p.x, p.y, p.pressure);
       app.requestRender();
     },
+    qmDab(app, p) {
+      const q = this.qm;
+      const ctx = app._quickMask.getContext('2d');
+      const size = Math.max(1, Math.round(q.size));
+      const tip = renderTip(q.tip, size, q.hardness);
+      ctx.save();
+      ctx.globalAlpha = q.flow;
+      if (q.hide) ctx.globalCompositeOperation = 'destination-out';
+      ctx.drawImage(tip, Math.round(p.x - size / 2), Math.round(p.y - size / 2));
+      ctx.restore();
+    },
     onMove(app, p) {
+      if (this.qm) {
+        const q = this.qm;
+        const dx = p.x - q.last.x, dy = p.y - q.last.y;
+        const dist = Math.hypot(dx, dy);
+        const step = Math.max(.5, q.size * q.spacing);
+        let t = step;
+        while (t <= dist) {
+          this.qmDab(app, { x: q.last.x + dx * t / dist, y: q.last.y + dy * t / dist });
+          t += step;
+        }
+        q.last = p;
+        app.requestRender();
+        return;
+      }
       if (!this.stroke) return;
       this.stroke.moveTo(p.x, p.y, p.pressure);
       app.requestRender();
     },
     onUp(app) {
+      if (this.qm) {
+        this.qm = null; // mask already painted live; session history lands on exit
+        app.requestRender();
+        return;
+      }
       if (!this.stroke) return;
       this.stroke.commit(this.strokeLabel || this.label);
       this.stroke = null;
@@ -728,6 +781,206 @@ T({
   },
 });
 
+/* ---------------- healing brush ---------------- */
+/* per-dab: grab a padded region, median-filter the RGB, keep the result
+   only inside the soft tip (destination-in), stamp it back — smudge-style
+   live application with one history rebuild on mouse-up */
+T({
+  id: 'heal', name: 'HEAL', key: 'j', icon: 'heal',
+  hint: 'spot heal: dab blemishes, they blend to the local median · [ ] size',
+  label: 'Heal brush',
+  options: [
+    { type: 'slider', key: 'size', label: 'Size', min: 4, max: 200, step: 1, scope: 'brush' },
+    { type: 'slider', key: 'hardness', label: 'Hardness', min: 0, max: 100, step: 1, scope: 'brush', pct: true },
+  ],
+  onDown(app, p) {
+    const layer = paintableLayer(app);
+    if (!layer) return;
+    this.layer = layer;
+    this.before = copyCanvas(layer.canvas);
+    this.last = p;
+    this.dab(app, p);
+  },
+  dab(app, p) {
+    const size = Math.max(4, Math.round(app.brush.size));
+    const k = clamp(Math.round(size / 6) | 1, 3, 9); // median window
+    const half = k >> 1;
+    const pad = half + 1;
+    const D = app.doc;
+    const x0 = Math.round(p.x - size / 2 - pad), y0 = Math.round(p.y - size / 2 - pad);
+    const rw = Math.min(D.width, size + pad * 2), rh = Math.min(D.height, size + pad * 2);
+    if (x0 < 0 || y0 < 0 || x0 + rw > D.width || y0 + rh > D.height) return;
+    const img = this.layer.ctx.getImageData(x0, y0, rw, rh);
+    const healed = medianRGB(img.data, rw, rh, k);
+    const tmp = makeCanvas(rw, rh);
+    const tctx = tmp.getContext('2d');
+    tctx.putImageData(new ImageData(healed, rw, rh), 0, 0);
+    // keep only the healed core inside the soft tip
+    const tip = renderTip('round', size, app.brush.hardness / 100);
+    tctx.globalCompositeOperation = 'destination-in';
+    tctx.drawImage(tip, Math.round(p.x - size / 2) - x0, Math.round(p.y - size / 2) - y0);
+    tctx.globalCompositeOperation = 'source-over';
+    this.layer.ctx.drawImage(tmp, x0, y0);
+  },
+  onMove(app, p) {
+    if (!this.before) return;
+    const size = Math.max(4, Math.round(app.brush.size));
+    const dx = p.x - this.last.x, dy = p.y - this.last.y;
+    const dist = Math.hypot(dx, dy);
+    const step = Math.max(1, size * .3);
+    const n = Math.floor(dist / step);
+    for (let i = 1; i <= n; i++) {
+      this.dab(app, { x: this.last.x + dx * i / n, y: this.last.y + dy * i / n });
+    }
+    if (n > 0) this.last = p;
+    app.doc.changed();
+  },
+  onUp(app) {
+    if (!this.before) return;
+    const layer = this.layer, before = this.before;
+    this.before = null; this.layer = null;
+    const now = copyCanvas(layer.canvas);
+    layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+    layer.ctx.drawImage(before, 0, 0);
+    app.doc.withLayerSnapshot('Heal brush', layer, () => {
+      layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+      layer.ctx.drawImage(now, 0, 0);
+    });
+  },
+  drawOverlay(app, ctx) {
+    if (app.pointer && app.pointerInView) {
+      const r = (app.brush.size / 2) * app.view.zoom;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(app.pointer.sx, app.pointer.sy, Math.max(2, r), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  },
+});
+
+/* ---------------- dodge / burn / sponge ---------------- */
+/* live blend-mode dabs straight onto the layer: exposure via the source
+   value the blend op sees, gradual via tip alpha × flow. one history
+   rebuild on mouse-up (smudge pattern). */
+function tonerTool(def) {
+  return {
+    ...def,
+    onDown(app, p) {
+      const layer = paintableLayer(app);
+      if (!layer) return;
+      this.layer = layer;
+      this.before = copyCanvas(layer.canvas);
+      this.last = p;
+      this.dab(app, p);
+    },
+    dab(app, p) {
+      const size = Math.max(2, Math.round(app.brush.size));
+      const ctx = this.layer.ctx;
+      const tip = renderTip('round', size, app.brush.hardness / 100);
+      const tmp = makeCanvas(size, size);
+      const tctx = tmp.getContext('2d');
+      tctx.drawImage(tip, 0, 0);
+      if (this.toneSource) {
+        tctx.globalCompositeOperation = 'source-in';
+        tctx.fillStyle = this.toneSource(app);
+        tctx.fillRect(0, 0, size, size);
+      }
+      ctx.save();
+      ctx.globalCompositeOperation = this.blendOp;
+      ctx.globalAlpha = this.flow(app);
+      ctx.drawImage(tmp, Math.round(p.x - size / 2), Math.round(p.y - size / 2));
+      ctx.restore();
+    },
+    onMove(app, p) {
+      if (!this.before) return;
+      const size = Math.max(2, Math.round(app.brush.size));
+      const dx = p.x - this.last.x, dy = p.y - this.last.y;
+      const dist = Math.hypot(dx, dy);
+      const step = Math.max(1, size * .25);
+      const n = Math.floor(dist / step);
+      for (let i = 1; i <= n; i++) {
+        this.dab(app, { x: this.last.x + dx * i / n, y: this.last.y + dy * i / n });
+      }
+      if (n > 0) this.last = p;
+      app.doc.changed();
+    },
+    flow(app) { return clamp((this.state.strength / 100) * (app.brush.flow / 100) * 3, .01, 1); },
+    onUp(app) {
+      if (!this.before) return;
+      const layer = this.layer, before = this.before;
+      this.before = null; this.layer = null;
+      const now = copyCanvas(layer.canvas);
+      layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+      layer.ctx.drawImage(before, 0, 0);
+      app.doc.withLayerSnapshot(this.label, layer, () => {
+        layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+        layer.ctx.drawImage(now, 0, 0);
+      });
+    },
+    drawOverlay(app, ctx) {
+      if (app.pointer && app.pointerInView) {
+        const r = (app.brush.size / 2) * app.view.zoom;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(app.pointer.sx, app.pointer.sy, Math.max(2, r), 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    },
+  };
+}
+
+const exposureOpts = [
+  { type: 'slider', key: 'size', label: 'Size', min: 4, max: 300, step: 1, scope: 'brush' },
+  { type: 'slider', key: 'hardness', label: 'Hardness', min: 0, max: 100, step: 1, scope: 'brush', pct: true },
+  { type: 'slider', key: 'exposure', label: 'Exposure', min: 1, max: 100, step: 1, scope: 'tool', def: 30 },
+  { type: 'slider', key: 'strength', label: 'Flow', min: 1, max: 100, step: 1, scope: 'tool', def: 80 },
+];
+
+T(tonerTool({
+  id: 'dodge', name: 'DODGE', key: 'o', icon: 'dodge',
+  hint: 'lighten brush strokes (color-dodge) · exposure sets the power',
+  label: 'Dodge',
+  options: exposureOpts,
+  state: { exposure: 30, strength: 80 },
+  blendOp: 'color-dodge',
+  toneSource(app) {
+    const v = Math.round(clamp(1 - this.state.exposure / 100 * .95, .05, .99) * 255);
+    return `rgb(${v},${v},${v})`;
+  },
+}));
+
+T(tonerTool({
+  id: 'burn', name: 'BURN', key: 'o', icon: 'burn',
+  hint: 'darken brush strokes (color-burn) · exposure sets the power',
+  label: 'Burn',
+  options: exposureOpts,
+  state: { exposure: 30, strength: 80 },
+  blendOp: 'color-burn',
+  toneSource(app) {
+    const v = Math.round(clamp(this.state.exposure / 100 * .95, .05, .99) * 255);
+    return `rgb(${v},${v},${v})`;
+  },
+}));
+
+T(tonerTool({
+  id: 'sponge', name: 'SPONGE', key: 'o', icon: 'sponge',
+  hint: 'saturate / desaturate strokes · mode picks the direction',
+  label: 'Sponge',
+  options: [
+    { type: 'slider', key: 'size', label: 'Size', min: 4, max: 300, step: 1, scope: 'brush' },
+    { type: 'slider', key: 'hardness', label: 'Hardness', min: 0, max: 100, step: 1, scope: 'brush', pct: true },
+    { type: 'seg', key: 'mode', label: 'Mode', values: [['desaturate', 'DESAT'], ['saturate', 'SAT']], scope: 'tool', def: 'desaturate' },
+    { type: 'slider', key: 'strength', label: 'Flow', min: 1, max: 100, step: 1, scope: 'tool', def: 80 },
+  ],
+  state: { mode: 'desaturate', strength: 80 },
+  blendOp: 'saturation',
+  toneSource() { return this.state.mode === 'saturate' ? 'rgb(255,0,0)' : 'rgb(128,128,128)'; },
+}));
+
 /* ---------------- fill / bucket ---------------- */
 T({
   id: 'fill', name: 'FILL', key: 'g', icon: 'fill',
@@ -846,7 +1099,7 @@ T({
 
 /* ---------------- shapes ---------------- */
 T({
-  id: 'shape', name: 'SHAPE', key: 'p', icon: 'shape',
+  id: 'shape', name: 'SHAPE', icon: 'shape', /* keyless — 'p' now belongs to pen */
   hint: 'drag to draw · Shift constrains · fills with FG, strokes with BG',
   options: [
     { type: 'select', key: 'kind', label: 'Shape', values: [['rect', 'RECTANGLE'], ['ellipse', 'ELLIPSE'], ['line', 'LINE'], ['star', 'STAR'], ['poly', 'POLYGON']], scope: 'tool', def: 'rect' },
@@ -925,6 +1178,139 @@ T({
     const sa = app.docToScreen(this.a.x, this.a.y), sb = app.docToScreen(this.b.x, this.b.y);
     this.path(ctx, { x: sa[0], y: sa[1] }, { x: sb[0], y: sb[1] });
     ctx.stroke();
+    ctx.restore();
+  },
+});
+
+/* ---------------- pen ---------------- */
+/* vector path: click = corner anchor, drag = curve handle (outgoing cp;
+   the incoming cp mirrors it), click the first anchor to close. Sampled
+   as a cubic poly-line for both overlay and conversion. */
+T({
+  id: 'pen', name: 'PEN', key: 'p', icon: 'pen',
+  hint: 'click anchors · drag for curves · click 1st anchor to close · Enter=selection, Esc=clear',
+  options: [
+    { type: 'button', label: '✓ MAKE SELECTION', action: 'select', scope: 'tool' },
+    { type: 'button', label: 'STROKE PATH', action: 'stroke', scope: 'tool' },
+    { type: 'button', label: '✗ CLEAR PATH', action: 'clear', scope: 'tool' },
+  ],
+  pts: null,
+  closed: false,
+  onDown(app, p) {
+    if (this.closed) return;
+    const pts = this.pts || (this.pts = []);
+    const near = 8 / Math.max(.01, app.view.zoom);
+    if (pts.length >= 3 && Math.hypot(p.x - pts[0].x, p.y - pts[0].y) < near) {
+      this.closed = true;
+      app.requestRender();
+      return;
+    }
+    pts.push({ x: p.x, y: p.y, cx: p.x, cy: p.y, curved: false });
+    this.dragIdx = pts.length; // 1-based index of the anchor being dragged
+  },
+  onMove(app, p) {
+    if (!this.pts || !this.dragIdx || this.closed) return;
+    const a = this.pts[this.dragIdx - 1];
+    if (Math.hypot(p.x - a.x, p.y - a.y) > 2) {
+      a.cx = p.x; a.cy = p.y; a.curved = true;
+      app.requestRender();
+    }
+  },
+  onUp() { this.dragIdx = null; },
+  onKey(app, e) {
+    if (e.key === 'Escape') { this.clear(app); return true; }
+    if (e.key === 'Enter') { this.doAction(app, 'select'); return true; }
+    return false;
+  },
+  clear(app) { this.pts = null; this.closed = false; app.requestRender(); },
+  /* cubic samples between anchors; anchor cx,cy is the outgoing handle,
+     the mirrored point is the incoming handle of the next anchor */
+  segments() {
+    const raw = this.pts ? (this.closed ? [...this.pts, this.pts[0]] : this.pts) : null;
+    if (!raw || raw.length < 2) return [];
+    const segs = [];
+    for (let i = 0; i < raw.length - 1; i++) {
+      const a = raw[i], b = raw[i + 1];
+      if (!a.curved && !b.curved) { segs.push([a, b, b, b]); continue; }
+      const p1 = a.curved ? { x: a.cx, y: a.cy } : { x: a.x, y: a.y };
+      const p2 = b.curved ? { x: 2 * b.x - b.cx, y: 2 * b.y - b.cy } : { x: b.x, y: b.y };
+      segs.push([a, p1, p2, b]);
+    }
+    return segs;
+  },
+  samplePath() {
+    const out = [];
+    for (const [p0, p1, p2, p3] of this.segments()) {
+      const len = Math.hypot(p1.x - p0.x, p1.y - p0.y) +
+        Math.hypot(p2.x - p1.x, p2.y - p1.y) + Math.hypot(p3.x - p2.x, p3.y - p2.y);
+      const n = Math.max(4, Math.min(64, Math.ceil(len * .8)));
+      for (let j = 0; j < n; j++) { // endpoint excluded — next segment starts there
+        const t = j / n, u = 1 - t;
+        const w0 = u * u * u, w1 = 3 * u * u * t, w2 = 3 * u * t * t, w3 = t * t * t;
+        out.push({ x: w0 * p0.x + w1 * p1.x + w2 * p2.x + w3 * p3.x,
+          y: w0 * p0.y + w1 * p1.y + w2 * p2.y + w3 * p3.y });
+      }
+      out.push({ x: p3.x, y: p3.y });
+    }
+    return out;
+  },
+  doAction(app, action) {
+    if (action === 'clear') return this.clear(app);
+    if (!this.pts || this.pts.length < 2) { app.toast('DRAW A PATH FIRST'); return; }
+    const D = app.doc;
+    const poly = this.samplePath();
+    if (action === 'select') {
+      const sel = Selection.fromPolygon(D.width, D.height, poly);
+      if (sel.isEmpty) { app.toast('SELECTION EMPTY', true); return; }
+      D.setSelection(sel, 'Make selection');
+      const b = sel.bounds;
+      app.toast(`SELECTED ${b.w}×${b.h} REGION`);
+    } else {
+      const layer = paintableLayer(app);
+      if (!layer) return;
+      const stroke = new Stroke(D, layer, strokeSettings(app, { spacing: .12, smooth: false, jitter: 0, angleJitter: 0 }));
+      poly.forEach(pt => stroke.moveTo(pt.x, pt.y, 1));
+      stroke.commit('Stroke path');
+    }
+    app.requestRender();
+  },
+  onDeactivate() { /* keep the path across tool switches, like PS */ },
+  drawOverlay(app, ctx) {
+    if (!this.pts) return;
+    ctx.save();
+    // sampled path
+    ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    this.samplePath().forEach((pt, i) => {
+      const [sx, sy] = app.docToScreen(pt.x, pt.y);
+      i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy);
+    });
+    if (!this.closed) { // rubber band to the pointer
+      const last = this.pts[this.pts.length - 1];
+      const hover = app.pointerInView && app.pointer ? app.pointer : null;
+      if (hover) {
+        const [sx, sy] = app.docToScreen(hover.x, hover.y);
+        const [lx, ly] = app.docToScreen(last.x, last.y);
+        ctx.moveTo(lx, ly); ctx.lineTo(sx, sy);
+      }
+    }
+    ctx.stroke();
+    // anchors + handles
+    for (let i = 0; i < this.pts.length; i++) {
+      const a = this.pts[i];
+      const [ax, ay] = app.docToScreen(a.x, a.y);
+      if (a.curved) {
+        const [cx, cy] = app.docToScreen(a.cx, a.cy);
+        const [ix, iy] = app.docToScreen(2 * a.x - a.cx, 2 * a.y - a.cy);
+        ctx.strokeStyle = 'rgba(13,132,255,.6)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(ix, iy); ctx.lineTo(cx, cy); ctx.stroke();
+      }
+      const size = i === 0 && !this.closed ? 6 : 4;
+      ctx.fillStyle = this.closed ? '#0d84ff' : '#050505';
+      ctx.beginPath(); ctx.arc(ax, ay, size / 2 + .5, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = i === 0 && !this.closed ? '#fff' : '#0d84ff';
+      ctx.stroke();
+    }
     ctx.restore();
   },
 });
@@ -1039,9 +1425,11 @@ export const transformTool = {
   id: 'transform', name: 'TRANSFORM', icon: 'move', internal: true,
   hint: 'drag corners to scale · ring to rotate · inside to move · Enter apply · Esc cancel',
   options: [
+    { type: 'seg', key: 'mode', label: 'Mode', values: [['scale', 'SCALE'], ['skew', 'SKEW'], ['distort', 'DISTORT']], scope: 'tool', def: 'scale' },
     { type: 'button', label: '✓ APPLY', action: 'apply', scope: 'tool' },
     { type: 'button', label: '✗ CANCEL', action: 'cancel', scope: 'tool' },
   ],
+  state: { mode: 'scale' },
   begin(app) {
     const D = app.doc;
     let layer = D.activeLayer;
@@ -1064,30 +1452,74 @@ export const transformTool = {
     this.layer = layer;
     this.snap = copyCanvas(layer.canvas);
     this.box = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
-    this.tx = { dx: 0, dy: 0, sx: 1, sy: 1, rot: 0 };
+    this.tx = { dx: 0, dy: 0, sx: 1, sy: 1, rot: 0, skx: 0, sky: 0 };
+    this.freeCorners = null;
     this.mode = null;
     return true;
   },
+  optionChanged(app, key) {
+    if (key !== 'mode' || !this.layer) return;
+    if (this.state.mode === 'distort') {
+      if (!this.freeCorners) this.freeCorners = this.corners();
+    } else {
+      this.freeCorners = null;
+      if (this.state.mode === 'scale') { this.tx.skx = 0; this.tx.sky = 0; }
+    }
+    app.requestRender();
+  },
   center() { return { x: this.box.x + this.box.w / 2 + this.tx.dx, y: this.box.y + this.box.h / 2 + this.tx.dy }; },
   corners() {
+    if (this.freeCorners) return this.freeCorners;
     const c = this.center();
-    const { sx, sy, rot } = this.tx;
-    const hw = this.box.w / 2 * sx, hh = this.box.h / 2 * sy;
+    const { sx, sy, rot, skx, sky } = this.tx;
+    // shear applies to unscaled half-dims, then scale, then rotate — the
+    // exact canvas pipeline used in applyPreview
+    const u = this.box.w / 2, v = this.box.h / 2;
     const cos = Math.cos(rot), sin = Math.sin(rot);
-    return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) =>
-      ({ x: c.x + x * cos - y * sin, y: c.y + x * sin + y * cos }));
+    return [[-u, -v], [u, -v], [u, v], [-u, v]].map(([a, b]) => {
+      const xs = a + skx * b, ys = b + sky * a;
+      const x = xs * sx, y = ys * sy;
+      return { x: c.x + x * cos - y * sin, y: c.y + x * sin + y * cos };
+    });
   },
   applyPreview(app) {
-    const l = this.layer, c = this.center();
+    const l = this.layer;
+    if (this.freeCorners) return this.warp(app);
+    const c = this.center();
     l.ctx.clearRect(0, 0, l.canvas.width, l.canvas.height);
     l.ctx.save();
     l.ctx.translate(c.x, c.y);
     l.ctx.rotate(this.tx.rot);
+    l.ctx.transform(1, this.tx.sky, this.tx.skx, 1, 0, 0);
     l.ctx.scale(this.tx.sx, this.tx.sy);
     l.ctx.drawImage(this.snap,
       this.box.x, this.box.y, this.box.w, this.box.h,
       -this.box.w / 2, -this.box.h / 2, this.box.w, this.box.h);
     l.ctx.restore();
+    app.doc.changed();
+  },
+  /* free-corner perspectve: box quad → free quad per triangle */
+  warp(app) {
+    const l = this.layer;
+    const { x, y, w, h } = this.box;
+    const src = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+    l.ctx.clearRect(0, 0, l.canvas.width, l.canvas.height);
+    for (const [a, b, c2] of [[0, 1, 2], [0, 2, 3]]) {
+      const aff = affineForTriangle(
+        { x: src[a][0], y: src[a][1] }, { x: src[b][0], y: src[b][1] }, { x: src[c2][0], y: src[c2][1] },
+        this.freeCorners[a], this.freeCorners[b], this.freeCorners[c2]);
+      if (!aff) continue;
+      l.ctx.save();
+      l.ctx.beginPath();
+      l.ctx.moveTo(this.freeCorners[a].x, this.freeCorners[a].y);
+      l.ctx.lineTo(this.freeCorners[b].x, this.freeCorners[b].y);
+      l.ctx.lineTo(this.freeCorners[c2].x, this.freeCorners[c2].y);
+      l.ctx.closePath();
+      l.ctx.clip();
+      l.ctx.transform(aff.a, aff.b, aff.c, aff.d, aff.e, aff.f);
+      l.ctx.drawImage(this.snap, 0, 0);
+      l.ctx.restore();
+    }
     app.doc.changed();
   },
   onDown(app, p, e) {
@@ -1099,12 +1531,18 @@ export const transformTool = {
     const sc = app.docToScreen(c.x, c.y);
     const distC = Math.hypot(sp[0] - sc[0], sp[1] - sc[1]);
     const maxCorner = Math.max(...corners.map(cn => Math.hypot(cn[0] - sc[0], cn[1] - sc[1])));
-    if (this.grabIdx >= 0) this.mode = 'scale';
-    else if (distC > maxCorner + 6 && distC < maxCorner + 46) this.mode = 'rotate';
+    const skewMode = !this.freeCorners && this.state.mode === 'skew';
+    if (this.grabIdx >= 0) this.mode = skewMode ? 'skew' : 'scale';
+    else if (!this.freeCorners && distC > maxCorner + 6 && distC < maxCorner + 46) this.mode = 'rotate';
     else this.mode = 'move';
     this.startP = p;
     this.startTx = { ...this.tx };
+    this.startFree = this.freeCorners ? this.freeCorners.map(q => ({ ...q })) : null;
+    this.grabOffset = this.freeCorners && this.grabIdx >= 0
+      ? { dx: this.freeCorners[this.grabIdx].x - p.x, dy: this.freeCorners[this.grabIdx].y - p.y } : null;
     this.startAngle = Math.atan2(p.y - c.y, p.x - c.x);
+    this.startCenter = c;
+    e && e.preventDefault;
   },
   onMove(app, p, e) {
     if (!this.mode) return;
@@ -1112,11 +1550,40 @@ export const transformTool = {
     if (this.mode === 'move') {
       this.tx.dx = st.dx + (p.x - this.startP.x);
       this.tx.dy = st.dy + (p.y - this.startP.y);
+      if (this.freeCorners && this.startFree) {
+        this.freeCorners = this.startFree.map(q => ({ x: q.x + this.tx.dx - st.dx, y: q.y + this.tx.dy - st.dy }));
+      }
     } else if (this.mode === 'rotate') {
       const c = this.center();
       const a = Math.atan2(p.y - c.y, p.x - c.x);
-      this.tx.rot = st.rot + (a - this.startAngle);
-      if (e.shiftKey) this.tx.rot = Math.round(this.tx.rot / (Math.PI / 12)) * (Math.PI / 12);
+      const da = a - this.startAngle;
+      if (this.freeCorners && this.startFree) {
+        const cos = Math.cos(da), sin = Math.sin(da);
+        this.freeCorners = this.startFree.map(q => ({
+          x: c.x + (q.x - c.x) * cos - (q.y - c.y) * sin,
+          y: c.y + (q.x - c.x) * sin + (q.y - c.y) * cos,
+        }));
+        this.tx.rot = st.rot + da;
+      } else {
+        this.tx.rot = st.rot + da;
+        if (e.shiftKey) this.tx.rot = Math.round(this.tx.rot / (Math.PI / 12)) * (Math.PI / 12);
+      }
+    } else if (this.mode === 'skew') {
+      // project the mouse move into un-rotated space and shear so the
+      // grabbed corner tracks it (within the ±45° tan clamp).
+      // X = (u + skx·v)·sx → ΔX = Δskx·v·sx; Y = (v + sky·u)·sy likewise
+      const c = { x: this.box.x + this.box.w / 2 + st.dx, y: this.box.y + this.box.h / 2 + st.dy };
+      const cos = Math.cos(-st.rot), sin = Math.sin(-st.rot);
+      const d = { x: p.x - this.startP.x, y: p.y - this.startP.y };
+      const dx = d.x * cos - d.y * sin, dy = d.x * sin + d.y * cos;
+      const u = this.box.w / 2, v = this.box.h / 2;
+      const limit = 1; // tan(±45°)
+      if (Math.abs(v * st.sx) > .01) this.tx.skx = clamp(st.skx + dx / (v * st.sx), -limit, limit);
+      if (Math.abs(u * st.sy) > .01) this.tx.sky = clamp(st.sky + dy / (u * st.sy), -limit, limit);
+    } else if (this.mode === 'scale' && this.freeCorners) {
+      // dragging a corner of the perspective quad moves it freely
+      this.freeCorners = this.startFree.map((q, i) => i === this.grabIdx
+        ? { x: p.x + this.grabOffset.dx, y: p.y + this.grabOffset.dy } : q);
     } else if (this.mode === 'scale') {
       const c = { x: this.box.x + this.box.w / 2 + st.dx, y: this.box.y + this.box.h / 2 + st.dy };
       const cos = Math.cos(-st.rot), sin = Math.sin(-st.rot);
@@ -1130,7 +1597,7 @@ export const transformTool = {
     }
     this.applyPreview(app);
   },
-  onUp() { this.mode = null; },
+  onUp() { this.mode = null; this.startFree = null; this.grabOffset = null; },
   onKey(app, e) {
     if (e.key === 'Enter') { this.doAction(app, 'apply'); return true; }
     if (e.key === 'Escape') { this.doAction(app, 'cancel'); return true; }
@@ -1151,7 +1618,7 @@ export const transformTool = {
         l.ctx.drawImage(now, 0, 0);
       });
     }
-    this.layer = null; this.snap = null;
+    this.layer = null; this.snap = null; this.freeCorners = null;
     app.exitTransform();
   },
   drawOverlay(app, ctx) {

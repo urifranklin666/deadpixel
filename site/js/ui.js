@@ -7,7 +7,7 @@ import { FILTERS, filterById, defaultParams, applyFilterToLayer, applyFilterToLa
 import { saveProjectFile, openDpx, exportDoc, downloadBlob, loadImageFile, docFromImage } from './io.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
-export const APP_VERSION = '1.9.0';
+export const APP_VERSION = '2.0.0';
 
 /* hand the adjustment kernels to the engine (compositor needs them; reverse
    dependency lives in the doc's filter lookup to avoid the import cycle) */
@@ -138,6 +138,21 @@ export async function newDocDialog(app) {
     app.newDoc(res.w, res.h, { name: res.name, bg });
   }
   return res;
+}
+
+/* ---- selection radius prompts (feather / expand / contract) ---- */
+async function selectRadiusDialog(title, label, def) {
+  return dialog(title, (body) => {
+    const n = numInput(def, 1, 250);
+    body.appendChild(row(label, n));
+    return { n };
+  }, [
+    { label: 'Cancel' },
+    { label: 'OK', primary: true, value: (c) => {
+      const v = clamp(parseInt(c.n.value) || 0, 1, 250);
+      return v > 0 ? v : '__invalid__';
+    }},
+  ]);
 }
 
 /* ---- image / canvas size ---- */
@@ -560,7 +575,23 @@ export function buildCommands(app) {
     'select.all': { label: 'Select All', key: 'Ctrl+A', run: needDoc(() => D().selectAll()) },
     'select.none': { label: 'Deselect', key: 'Ctrl+D', run: needDoc(() => D().deselect()) },
     'select.invert': { label: 'Invert Selection', key: 'Ctrl+Shift+I', run: needDoc(() => D().invertSelection()) },
-    'select.bycolor': { label: 'Select By Color', key: 'Q', run: needDoc(() => app.setTool('colorsel')) },
+    'select.quickmask': { label: 'Quick Mask (Q to exit)', key: 'Q', run: needDoc(() => app.setQuickMask(!app.quickMask)) },
+    'select.bycolor': { label: 'Select By Color', key: null, run: needDoc(() => app.setTool('colorsel')) },
+    'select.feather': { label: 'Feather Selection…', key: null, run: needDoc(async () => {
+      if (!D().selection || D().selection.isEmpty) { app.toast('NOTHING SELECTED', true); return; }
+      const px = await selectRadiusDialog('FEATHER SELECTION', 'Feather radius px', 4);
+      if (px && !D().featherSelection(px)) app.toast('NOTHING SELECTED', true);
+    }) },
+    'select.expand': { label: 'Expand Selection…', key: null, run: needDoc(async () => {
+      if (!D().selection || D().selection.isEmpty) { app.toast('NOTHING SELECTED', true); return; }
+      const px = await selectRadiusDialog('EXPAND SELECTION', 'Expand by px', 4);
+      if (px && !D().growSelection(px)) app.toast('NOTHING SELECTED', true);
+    }) },
+    'select.contract': { label: 'Contract Selection…', key: null, run: needDoc(async () => {
+      if (!D().selection || D().selection.isEmpty) { app.toast('NOTHING SELECTED', true); return; }
+      const px = await selectRadiusDialog('CONTRACT SELECTION', 'Contract by px', 4);
+      if (px && !D().growSelection(px, true)) app.toast('NOTHING SELECTED', true);
+    }) },
 
     'filter.repeat': { label: 'Repeat Last Filter', key: 'Ctrl+F', run: needDoc(() => app.repeatLastFilter()) },
 
@@ -608,7 +639,7 @@ const MENU_LAYOUT = [
     { sub: 'NEW ADJUSTMENT LAYER', items: () => ADJUSTABLE.map(f => 'adj.' + f.id) },
     { sub: 'LAYER MASK', items: ['layer.maskreveal', 'layer.maskhide', 'layer.maskfromsel', 'layer.maskhidefromsel', null, 'layer.masktoggle', 'layer.maskapply', 'layer.maskdelete'] },
     null, 'layer.merge', 'layer.rasterizegroup', 'layer.rasterize', null, 'layer.flatten']],
-  ['SELECT', ['select.all', 'select.none', 'select.invert', null, 'select.bycolor']],
+  ['SELECT', ['select.all', 'select.none', 'select.invert', null, 'select.feather', 'select.expand', 'select.contract', null, 'select.quickmask', 'select.bycolor']],
   ['FILTER', ['filter.repeat', null, { sub: 'ALL FILTERS', items: () => FILTERS.filter(f => f.group === 'filter').map(f => 'fx.' + f.id) }]],
   ['VIEW', ['view.zoomin', 'view.zoomout', 'view.fit', 'view.hundred', null, 'view.fullscreen']],
   ['HELP', ['help.shortcuts', 'help.projectsettings', 'help.updates', 'help.diagnostics', 'help.report', null, 'help.about', 'file.windows', 'help.home']],
@@ -666,11 +697,11 @@ export function buildMenus(app) {
 export function buildToolbar(app) {
   const bar = $('#toolbar');
   bar.innerHTML = '';
-  const groupBreaks = new Set(['crop', 'brush', 'fill', 'text', 'hand']);
+  const groupBreaks = new Set(['crop', 'heal', 'fill', 'text', 'hand']);
   for (const t of TOOLS) {
     if (groupBreaks.has(t.id)) bar.appendChild(el('div', 'tool-sep'));
     const b = el('button', 'tool-btn', iconSvg(t.icon));
-    b.title = `${t.name} (${t.key.toUpperCase()})`;
+    b.title = t.key ? `${t.name} (${t.key.toUpperCase()})` : t.name;
     b.dataset.tool = t.id;
     b.addEventListener('click', () => app.setTool(t.id));
     bar.appendChild(b);
@@ -709,6 +740,11 @@ export function buildOptionsBar(app) {
   if (app.maskTarget) {
     bar.appendChild(el('span', 'opt-chip',
       '⬒ LAYER MASK · light fg / brush REVEALS · dark fg or eraser HIDES · click the layer thumbnail to leave'));
+  }
+
+  if (app.quickMask) {
+    bar.appendChild(el('span', 'opt-chip',
+      '◐ QUICK MASK · brush/pencil ADD TO THE MASK · dark fg or eraser CARVES · Q exits and turns the mask into a selection'));
   }
 
   const title = el('span', 'opt-label', tool.name);
@@ -759,6 +795,7 @@ export function buildOptionsBar(app) {
           seg.querySelectorAll('button').forEach(x => x.classList.remove('on'));
           b.classList.add('on');
           app.onTextOptionChanged?.(opt.key);
+          tool.optionChanged?.(app, opt.key);
         });
         seg.appendChild(b);
       }

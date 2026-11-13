@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.0
+
+### Added
+
+- Selection refinement: SELECT ▸ Feather… (gaussian-style blur of the selection mask), Expand… and Contract… (exact Euclidean distance transform, rounded corners, soft 1px rims via the new pure-math `pixelops.js` module).
+- Quick Mask (SELECT ▸ Quick Mask or Q): paint the selection with the brush, pencil, or eraser over a red rubylith preview — light fg adds coverage, dark fg or the eraser carves it away; exiting bakes the working mask into the document selection as one history entry.
+- Transform modes (Ctrl+T options bar): SCALE (as before), SKEW (corner drag shears the quad, ±45° clamp), and DISTORT (four free corners mapped per-triangle for true perspective).
+- Retouch tools: Healing Brush (J — per-dab median blending for blemish removal), Dodge, Burn, and Sponge (O cycles — live color-dodge / color-burn / saturation stroke dabs with exposure/flow control).
+- Pen tool (P; SHAPE is now keyless): click anchors, drag for curve handles, click the first anchor to close; buttons convert the path to a selection, stroke it with the current brush, or delete it.
+
+### Changed
+
+- Select By Color lost its Q keybinding to Quick Mask (it stays reachable from the SELECT menu and the toolbar).
+- The transform tool gained a MODE segment (Scale / Skew / Distort) in its options bar; switching modes resets the corresponding state.
+
+### Compatibility
+
+- All new features operate on the existing document, selection, and history primitives; .dpx project files are unchanged and fully compatible.
+
 ## 1.9.0
 
 ### Added

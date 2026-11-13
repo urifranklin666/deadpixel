@@ -1,7 +1,7 @@
 {
   "name": "deadpixel",
   "productName": "DeadPixel",
-  "version": "1.9.0",
+  "version": "2.0.0",
   "description": "DEADPIXEL — local-first image editor. A deadplug.digital transmission.",
   "author": "deadplug.digital",
   "main": "main.js",
