@@ -434,6 +434,11 @@ option { background: var(--input); color: var(--ink); }
   display: grid; place-items: center; color: var(--ink-dim); font-size: 13px;
   background: linear-gradient(180deg, #2a2a2a, #222);
 }
+.layer-thumb.adjust {
+  display: grid; place-items: center; color: var(--ink); font-size: 15px; line-height: 1;
+  background: linear-gradient(180deg, #2b2b2b, #1f1f1f);
+}
+.layer-thumb.adjust:hover { border-color: var(--accent); color: var(--osd-white); }
 .mask-thumb {
   width: 20px; height: 15px; flex: none; padding: 0; cursor: pointer;
   border: 1px solid #4a4a4a; border-radius: 2px; overflow: hidden; background: #0c0c0c;
@@ -471,6 +476,22 @@ option { background: var(--input); color: var(--ink); }
 .hist-row:hover { background: rgba(255, 255, 255, .06); }
 .hist-row.current { border-left-color: var(--accent); color: var(--osd-white); background: rgba(13, 132, 255, .08); }
 .hist-row.undone { color: #6a6a6a; }
+
+/* navigator panel */
+.nav-wrap {
+  position: relative; width: min(260px, 100%); margin-top: 4px;
+  border: 1px solid #2e2e2e; background: #0c0c0c;
+}
+.nav-wrap canvas { display: block; width: 100%; height: auto; }
+#nav-rect { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
+.nav-ctrl { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.nav-ctrl .pbtn { flex: none; padding: 3px 8px; }
+.nav-ctrl .opt-val { flex: 1; text-align: right; }
+
+/* histogram panel */
+.hist-mode { margin-top: 3px; }
+#hist-canvas { display: block; width: 100%; height: auto; border: 1px solid #2e2e2e; background: #131313; }
+.hist-info { display: block; margin-top: 6px; min-width: 0; text-align: left; }
 
 /* actions panel */
 .action-row {

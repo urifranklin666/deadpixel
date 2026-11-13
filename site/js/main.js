@@ -68,16 +68,22 @@ class App {
       this.requestRender();
       this.refreshTitle();
       this._layersDirty = true;
+      this._navThumbDirty = true;
+      this._histogramDirty = true;
     });
     doc.history.addEventListener('change', () => {
       this.refreshHistory?.();
       this._layersDirty = true;
+      this._navThumbDirty = true;
+      this._histogramDirty = true;
       this.requestRender();
     });
     this.refreshTitle();
     this.refreshLayers?.();
     this.refreshHistory?.();
     this.refreshActions?.();
+    this._navThumbDirty = true;
+    this._histogramDirty = true;
     this.fitView();
     document.querySelector('#launch-bay')?.classList.add('gone');
     document.body.classList.add('has-doc');
@@ -270,6 +276,12 @@ class App {
         this._layersDirty = false;
         this.refreshLayers?.();
       }, 120);
+    }
+    // workflow panels: navigator rect moves every frame, histogram samples only on content change
+    this.renderNav?.();
+    if (this._histogramDirty) {
+      this._histogramDirty = false;
+      this.renderHistogram?.();
     }
   }
 
@@ -809,6 +821,7 @@ class App {
     const D = this.doc;
     const l = D.activeLayer;
     if (!l || l.locked) return;
+    if (l.type === 'adjust') return; // full-canvas node — nothing to nudge
     if (l.type === 'group') {
       D.recordTranslate('Nudge', l.id, dx, dy);
       D.translateNode(l.id, dx, dy);

@@ -1,9 +1,16 @@
 import { test, expect } from 'playwright/test';
 
 test.beforeEach(async ({ page }) => {
+  page._pageErrors = [];
+  page.on('pageerror', (err) => { page._pageErrors.push(String(err)); });
   await page.addInitScript(() => sessionStorage.setItem('dp_booted', '1'));
   await page.goto('/');
   await expect(page.locator('#app')).toBeVisible();
+  await expect(page.locator('#boot')).toHaveClass(/off/);
+});
+
+test.afterEach(async ({ page }) => {
+  expect(page._pageErrors).toEqual([]);
 });
 
 test('sample, brush stroke, undo, and redo form a complete editing flow', async ({ page }) => {
@@ -145,6 +152,191 @@ test('clipping masks confine a layer to the layer below', async ({ page }) => {
   expect(result.inside).toEqual([0, 255, 255, 255]);
   expect(result.outside).toEqual([0, 0, 0, 0]);
   expect(result.unclipped).toEqual([0, 255, 255, 255]);
+});
+
+test('adjustment layers filter layers below and track parameter history', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'ADJ TEST' }));
+    const D = app.doc;
+    const base = D.activeLayer;
+    base.ctx.fillStyle = '#406080'; base.ctx.fillRect(0, 0, 64, 64); base.revision++;
+    const adj = D.addAdjustmentLayer('exposure', { stops: 5, offset: 0 });
+    D.changed();
+    const px = (x, y) => { D.compose(); return Array.from(D._compoCtx.getImageData(x, y, 1, 1).data); };
+    const exposed = px(30, 30);
+    D.setAdjustParams(adj.id, { stops: -5, offset: 0 }, 'E2E exposure');
+    D.changed();
+    const darkened = px(30, 30);
+    D.history.undo(); D.changed(); // params restored to +5 (layer stays)
+    const undone = px(30, 30);
+    adj.visible = false; D.changed();
+    const off = px(30, 30);
+    adj.visible = true; D.changed();
+    const restored = px(30, 30);
+    return {
+      type: adj.type, name: adj.name,
+      exposed, darkened, undone, off, restored,
+      lastLabel: D.history.entries[D.history.index].label,
+    };
+  });
+  expect(result.type).toBe('adjust');
+  expect(result.name).toBe('exposure');
+  expect(result.exposed).toEqual([91, 136, 181, 255]); // ×2^(5/10)
+  expect(result.darkened).toEqual([45, 68, 91, 255]); // ×2^(-5/10)
+  expect(result.undone).toEqual(result.exposed);
+  expect(result.off).toEqual([64, 96, 128, 255]);
+  expect(result.restored).toEqual(result.exposed);
+  expect(result.lastLabel).toBe('New adjustment layer');
+});
+
+test('multiply blend composites pixel layers against the layers below', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'BLEND TEST' }));
+    const D = app.doc;
+    const base = D.activeLayer;
+    base.ctx.fillStyle = '#ff0000'; base.ctx.fillRect(0, 0, 64, 64); base.revision++;
+    const over = D.addLayer(null, 'MULT');
+    over.ctx.fillStyle = '#00ffff'; over.ctx.fillRect(0, 0, 64, 64); over.revision++;
+    over.blend = 'multiply';
+    D.changed();
+    const px = (x, y) => { D.compose(); return Array.from(D._compoCtx.getImageData(x, y, 1, 1).data); };
+    const multiplied = px(30, 30);
+    over.blend = 'source-over'; D.changed();
+    const plain = px(30, 30);
+    return { multiplied, plain };
+  });
+  expect(result.multiplied).toEqual([0, 0, 0, 255]); // red × cyan
+  expect(result.plain).toEqual([0, 255, 255, 255]);
+});
+
+test('pass-through groups blend children against the backdrop, not the buffer', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'PT TEST' }));
+    const D = app.doc;
+    const base = D.activeLayer;
+    base.ctx.fillStyle = '#ff0000'; base.ctx.fillRect(0, 0, 64, 64); base.revision++;
+    const gray = D.addLayer(null, 'GRAY');
+    gray.ctx.fillStyle = '#808080'; gray.ctx.fillRect(0, 0, 64, 64); gray.revision++;
+    gray.blend = 'multiply';
+    const g = D.groupFromActive(); // group sits above Background; gray stays active
+    const white = D.addLayer(null, 'GLINT'); // sibling of gray, inside the group
+    white.ctx.fillStyle = '#ffffff'; white.ctx.fillRect(0, 0, 64, 64); white.revision++;
+    white.opacity = .5;
+    D.changed();
+    const px = (x, y) => { D.compose(); return Array.from(D._compoCtx.getImageData(x, y, 1, 1).data); };
+    g.blend = 'multiply'; D.changed();
+    const buffered = px(30, 30);
+    g.blend = 'pass-through'; D.changed();
+    const through = px(30, 30);
+    return { childCount: g.children.length, buffered, through };
+  });
+  expect(result.childCount).toBe(2);
+  // buffered: the group renders gray-ish, then multiplies with red → green channel dies
+  expect(result.buffered[0]).toBeGreaterThanOrEqual(185);
+  expect(result.buffered[1]).toBeLessThanOrEqual(6);
+  // pass-through: white half-blends the multiply result → green channel lives
+  expect(result.through[0]).toBeGreaterThanOrEqual(185);
+  expect(result.through[1]).toBeGreaterThanOrEqual(120);
+});
+
+test('Navigator and Histogram panels paint live document views', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    app.attachDoc(new Doc(64, 64, { name: 'PANEL TEST' }));
+    const D = app.doc;
+    D.activeLayer.ctx.fillStyle = '#e02020'; D.activeLayer.ctx.fillRect(8, 8, 48, 48); D.activeLayer.revision++;
+    D.changed(); D.compose(); // panels sample D._compoCtx — build it now
+
+    app.activatePanelMode('navigator'); // sets _navThumbDirty
+    app.renderNav();
+    const navCtx = document.getElementById('nav-canvas').getContext('2d');
+    const center = navCtx.getImageData(130, 86, 1, 1).data;
+    const boxCtx = document.getElementById('nav-rect').getContext('2d');
+    const blue = boxCtx.getImageData(0, 0, 260, 172).data;
+    let blueCount = 0;
+    for (let i = 2; i < blue.length; i += 4) if (blue[i] > 90 && blue[i - 2] < 90) blueCount++;
+    const zoomPct = document.querySelector('#panel-navigator .nav-ctrl .opt-val').textContent;
+
+    app.activatePanelMode('histogram'); // sets _histogramDirty
+    app.renderHistogram();
+    const hcv = document.getElementById('hist-canvas');
+    const histPixels = hcv.getContext('2d').getImageData(0, 0, hcv.width, hcv.height).data;
+    let histBars = 0;
+    for (let i = 0; i < histPixels.length; i += 4) if (histPixels[i] > 120) histBars++; // bars ~184 over the #191919 bg
+    const info = document.querySelector('#panel-histogram .hist-info').textContent;
+    return {
+      navCenterAlpha: center[3], navCenterRed: center[0],
+      blueCount, zoomPct, histBars, info,
+      panelTabs: Array.from(document.querySelectorAll('.panel-tabs button')).map(b => b.textContent),
+    };
+  });
+  // navigator thumbnail shows the red square; viewport box strokes blue; zoom readout live
+  expect(result.navCenterAlpha).toBeGreaterThan(128);
+  expect(result.navCenterRed).toBeGreaterThan(150);
+  expect(result.blueCount).toBeGreaterThan(20);
+  expect(result.zoomPct).toMatch(/%$/);
+  // histogram bars present; mean/median of #e02020 luminance ≈ 89
+  expect(result.histBars).toBeGreaterThan(50);
+  expect(result.info).toMatch(/MEAN (8[7-9]|90) · MEDIAN (8[7-9]|90) ·/);
+  expect(result.panelTabs).toEqual(expect.arrayContaining(['NAVIGATOR', 'HISTOGRAM']));
+});
+
+test('v4 projects round-trip adjustment layers through DPX', async ({ page }) => {
+  await page.getByRole('button', { name: /XEROX GOSPEL/ }).click();
+  const result = await page.evaluate(async () => {
+    const app = window.deadpixel;
+    const { Doc } = await import('/js/engine.js');
+    const io = await import('/js/io.js');
+    app.attachDoc(new Doc(64, 64, { name: 'V4 RP' }));
+    const D = app.doc;
+    const base = D.activeLayer;
+    base.ctx.fillStyle = '#406080'; base.ctx.fillRect(0, 0, 64, 64); base.revision++;
+    const adj = D.addAdjustmentLayer('exposure', { stops: 5, offset: 0 });
+    D.addLayerMask(adj.id, 'reveal-all');
+    D.withMaskSnapshot('Paint mask', adj, mctx => {
+      mctx.globalCompositeOperation = 'destination-out';
+      mctx.fillRect(0, 0, 64, 16); // top strip stays unadjusted
+    });
+    D.changed();
+    const px = (doc, x, y) => { doc.compose(); return Array.from(doc._compoCtx.getImageData(x, y, 1, 1).data); };
+    const before = { shown: px(D, 30, 30), strip: px(D, 30, 8) };
+    const files = await io.serializeDoc(D);
+    const meta = JSON.parse(new TextDecoder().decode(files['doc.json']));
+    const restored = await io.docFromFiles(files);
+    app.attachDoc(restored);
+    restored.changed();
+    const radj = restored.flatLayers.find(l => l.type === 'adjust');
+    const after = { shown: px(restored, 30, 30), strip: px(restored, 30, 8) };
+    return {
+      version: meta.version,
+      filter: radj.filter, params: radj.params, masked: !!radj.mask,
+      maskKey: String(meta.layersTree[1].mask).startsWith('layer-'),
+      maskBytes: Object.keys(files).some(k => k.startsWith('masks/layer-')),
+      before, after,
+      names: restored.flatLayers.map(l => l.name),
+    };
+  });
+  expect(result.version).toBe(4);
+  expect(result.filter).toBe('exposure');
+  expect(result.params).toEqual({ stops: 5, offset: 0 });
+  expect(result.masked).toBe(true);
+  expect(result.maskKey).toBe(true);
+  expect(result.maskBytes).toBe(true);
+  expect(result.names).toEqual(['Background', 'exposure']);
+  expect(result.before.shown).toEqual([91, 136, 181, 255]); // exposed below the mask edge
+  expect(result.before.strip).toEqual([64, 96, 128, 255]); // erased strip stays raw
+  expect(result.after).toEqual(result.before);
 });
 
 test('v3 projects round-trip groups, masks, and clipping through DPX', async ({ page }) => {

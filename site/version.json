@@ -1,5 +1,5 @@
 {
-  "version": "1.8.0",
-  "url": "https://github.com/urifranklin666/deadpixel/releases/tag/v1.8.0",
-  "notes": ["Layer groups and layer trees", "Layer masks with brush editing", "Clipping masks", "Photoshop-style neutral dark UI", ".dpx v3 project format (groups/masks/clipping), fully backward compatible"]
+  "version": "1.9.0",
+  "url": "https://github.com/urifranklin666/deadpixel/releases/tag/v1.9.0",
+  "notes": ["Adjustment layers — all 11 adjust filters incl. new Vibrance, Photo Filter and Exposure", "Pass Through group blending", "Navigator panel with live viewport box", "Histogram panel (luminance + RGB)", ".dpx v4 project format (adjustment layers), fully backward compatible"]
 }

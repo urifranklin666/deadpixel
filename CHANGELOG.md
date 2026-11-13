@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.9.0
+
+### Added
+
+- Adjustment layers: non-destructive filter layers built on the 11 adjust-group kernels (Brightness/Contrast, Hue/Saturation, Levels, Invert, Desaturate, Posterize, Threshold, Colorize), plus three new filters — Vibrance, Photo Filter, and Exposure.
+- LAYER ▸ NEW ADJUSTMENT LAYER submenu with live parameter preview, per-layer masking, group support, and parameter history.
+- Pass Through group blending: groups with Pass Through render children directly against layers below the group instead of onto the flattened group contents.
+- Navigator panel: live composite thumbnail with a draggable viewport box and zoom −/FIT/+ controls.
+- Histogram panel: luminance and RGB views with mean/median readout.
+- .dpx project format v4 storing adjustment layers with parameters and masks.
+
+### Changed
+
+- Layer panel thumbnails distinguish adjustment layers with an ƒ badge that opens the parameter dialog; blend select offers Pass Through for groups and coerces it on pixel layers.
+- Painting, filters, transforming, moving, and nudging guard against adjustment layers, which have no pixel canvas; their masks remain paintable.
+
+### Compatibility
+
+- Documents carrying adjustment layers serialize as v4 bytes and require DEADPIXEL 1.9+ to edit; v1, v2, and v3 projects keep opening, and treeless documents without adjustment layers still serialize as v2.
+- Adjustment layers merge onto pixel layers only; flattening bakes them into the flattened result.
+
 ## 1.8.0
 
 ### Added

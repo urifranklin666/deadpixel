@@ -3,13 +3,13 @@
    Format v3 stores a layer tree (groups, layer masks, clipping); documents that use
    none of those features still serialize as v2 for maximum compatibility. */
 
-import { Doc, Layer, TextLayer, GroupLayer, makeCanvas, flattenLayers, MAX_TREE_DEPTH } from './engine.js';
+import { Doc, Layer, TextLayer, GroupLayer, AdjustLayer, makeCanvas, flattenLayers, MAX_TREE_DEPTH } from './engine.js';
 
-const FORMAT_VERSION = 3;
+const FORMAT_VERSION = 4;
 const MAX_DIMENSION = 32768;
 const MAX_PIXELS = 128 * 1024 * 1024;
 const MAX_LAYERS = 256;
-const VALID_NODE_TYPES = ['raster', 'text', 'group'];
+const VALID_NODE_TYPES = ['raster', 'text', 'group']; // per-version set lives in validateNodes
 
 function canvasToPngBytes(canvas) {
   return new Promise((resolve, reject) => {
@@ -71,7 +71,7 @@ export function validateProjectMeta(meta) {
   if (meta.version >= 3) {
     if (!Array.isArray(meta.layersTree)) throw new Error('invalid or oversized layer list');
     const counter = { n: 0 };
-    validateNodes(meta.layersTree, 0, counter);
+    validateNodes(meta.layersTree, 0, counter, meta.version);
     return meta;
   }
   if (!Array.isArray(meta.layers) || meta.layers.length > MAX_LAYERS) {
@@ -85,16 +85,28 @@ export function validateProjectMeta(meta) {
   return meta;
 }
 
-function validateNodes(nodes, depth, counter) {
+function validateAdjustNode(node) {
+  if (typeof node.filter !== 'string' || !node.filter) throw new Error('invalid layer metadata');
+  if (node.params != null && typeof node.params !== 'object') throw new Error('invalid layer metadata');
+  for (const v of Object.values(node.params || {})) {
+    if (!Number.isFinite(v)) throw new Error('invalid layer metadata');
+  }
+}
+
+function validateNodes(nodes, depth, counter, version = 3) {
+  const allowed = version >= 4
+    ? ['raster', 'text', 'group', 'adjust']
+    : ['raster', 'text', 'group'];
   if (depth > MAX_TREE_DEPTH) throw new Error('invalid or oversized layer list');
   for (const node of nodes) {
-    if (!node || !VALID_NODE_TYPES.includes(node.type) || typeof node.id !== 'string') {
+    if (!node || !allowed.includes(node.type) || typeof node.id !== 'string') {
       throw new Error('invalid layer metadata');
     }
+    if (node.type === 'adjust') validateAdjustNode(node);
     if (++counter.n > MAX_LAYERS) throw new Error('invalid or oversized layer list');
     if (node.children != null) {
       if (!Array.isArray(node.children)) throw new Error('invalid layer metadata');
-      validateNodes(node.children, depth + 1, counter);
+      validateNodes(node.children, depth + 1, counter, version);
     }
   }
 }
@@ -137,7 +149,7 @@ function decodeMaskCanvas(img, width, height) {
 
 const usesTreeFeatures = (doc) =>
   doc.layers.some(l => l.type === 'group') ||
-  flattenLayers(doc.layers).some(l => l.mask || l.clipped);
+  flattenLayers(doc.layers).some(l => l.mask || l.clipped || l.type === 'adjust');
 
 /* shared per-node serialization (raster image bytes, text props) */
 async function serializeNodeFile(doc, l, options, files) {
@@ -150,10 +162,12 @@ async function serializeNodeFile(doc, l, options, files) {
 }
 
 export async function serializeDoc(doc, options = {}) {
+  const flatAll = flattenLayers(doc.layers);
+  const hasAdjust = flatAll.some(l => l.type === 'adjust');
   if (!usesTreeFeatures(doc)) return serializeDocV2(doc, options);
 
   const meta = {
-    app: 'DEADPIXEL', version: 3,
+    app: 'DEADPIXEL', version: hasAdjust ? 4 : 3,
     name: doc.name, width: doc.width, height: doc.height,
     activeId: doc._activeId ?? null,
     effects: doc.effects || [],
@@ -184,6 +198,9 @@ export async function serializeDoc(doc, options = {}) {
         entry.children = await walk(l.children);
       } else if (l.type === 'text') {
         entry.text = { ...l.t };
+      } else if (l.type === 'adjust') {
+        entry.filter = l.filter;
+        entry.params = { ...(l.params || {}) };
       } else {
         await serializeNodeFile(doc, l, options, files);
       }
@@ -341,6 +358,8 @@ export async function docFromFiles(files) {
         layer.expanded = le.expanded !== false;
         layer.children = [];
         for (const child of le.children || []) layer.children.push(await buildNode(child, depth + 1));
+      } else if (le.type === 'adjust') {
+        layer = new AdjustLayer(le.filter, le.params && { ...le.params }, le.name);
       } else if (le.type === 'text') {
         layer = new TextLayer(meta.width, meta.height, { name: le.name, t: le.text });
       } else {

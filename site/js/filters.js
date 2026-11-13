@@ -261,6 +261,54 @@ export const FILTERS = [
     },
   },
 
+  {
+    id: 'vibrance', name: 'Vibrance', group: 'adjust',
+    params: [{ key: 'amount', label: 'Amount', min: -100, max: 100, step: 1, def: 25 }],
+    apply(img, w, h, p) {
+      const amt = p.amount / 220;
+      return perPixel(img, (d, i) => {
+        const mx = Math.max(d[i], d[i + 1], d[i + 2]) / 255;
+        const mn = Math.min(d[i], d[i + 1], d[i + 2]) / 255;
+        const sat = mx - mn; // muted colors boost most
+        const s = 1 + amt * (1 - sat);
+        const lum = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
+        d[i] = cl(lum + (d[i] - lum) * s);
+        d[i + 1] = cl(lum + (d[i + 1] - lum) * s);
+        d[i + 2] = cl(lum + (d[i + 2] - lum) * s);
+      });
+    },
+  },
+  {
+    id: 'photo-filter', name: 'Photo Filter', group: 'adjust',
+    params: [
+      { key: 'warmth', label: 'Warmth', min: -50, max: 50, step: 1, def: 10 },
+      { key: 'tint', label: 'Tint', min: -50, max: 50, step: 1, def: 0 },
+    ],
+    apply(img, w, h, p) {
+      const wr = p.warmth * .014, wb = -p.warmth * .012, gt = p.tint * .012;
+      return perPixel(img, (d, i) => {
+        d[i] = cl(d[i] * (1 + wr) + wr * 20);
+        d[i + 1] = cl(d[i + 1] * (1 + gt * .4) + gt * 8);
+        d[i + 2] = cl(d[i + 2] * (1 + wb) + wb * 24);
+      });
+    },
+  },
+  {
+    id: 'exposure', name: 'Exposure', group: 'adjust',
+    params: [
+      { key: 'stops', label: 'Stops ×10', min: -25, max: 25, step: 1, def: 0 },
+      { key: 'offset', label: 'Offset', min: -50, max: 50, step: 1, def: 0 },
+    ],
+    apply(img, w, h, p) {
+      const gain = Math.pow(2, p.stops / 10), off = p.offset * 2;
+      return perPixel(img, (d, i) => {
+        d[i] = cl(d[i] * gain + off);
+        d[i + 1] = cl(d[i + 1] * gain + off);
+        d[i + 2] = cl(d[i + 2] * gain + off);
+      });
+    },
+  },
+
   /* -------- blur / sharpen -------- */
   {
     id: 'gaussian-blur', name: 'Gaussian Blur', group: 'filter',

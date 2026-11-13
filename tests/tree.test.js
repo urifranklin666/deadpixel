@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GroupLayer, flattenLayers, countLeaves, MAX_TREE_DEPTH, uid } from '../site/js/engine.js';
+import { GroupLayer, AdjustLayer, setAdjustFilters, flattenLayers, countLeaves, MAX_TREE_DEPTH, uid } from '../site/js/engine.js';
 
 /* Canvas-free tree tests: everything here runs in plain node.
    Doc-level structural operations (groups, reparenting, clipping) are
@@ -96,4 +96,62 @@ test('depth budget constant matches the documented limit', () => {
 test('uid stays unique within a batch', () => {
   const seen = new Set(Array.from({ length: 200 }, () => uid()));
   assert.equal(seen.size, 200);
+});
+
+/* ---- adjustment layers ---- */
+
+const adjustable = () => [ // fake registry like the one filters.js injects
+  { id: 'exposure', params: [{ key: 'stops', def: 0 }, { key: 'offset', def: 0 }] },
+  { id: 'vibrance', params: [{ key: 'amount', def: 25 }] },
+];
+
+test('adjustment layers carry filter id, params, and no children', () => {
+  const a = new AdjustLayer('exposure', { stops: 5 }, 'Look');
+  assert.equal(a.type, 'adjust');
+  assert.equal(a.filter, 'exposure');
+  assert.deepEqual(a.params, { stops: 5 });
+  assert.equal(a.name, 'Look');
+  assert.equal(a.contains(a.id), true);
+  assert.equal(a.contains('other'), false);
+  const bare = new AdjustLayer(null); // Doc.addAdjustmentLayer names it after the filter
+  assert.equal(bare.name, 'Adjustment');
+  assert.deepEqual(bare.params, {});
+});
+
+test('adjustment layer clone is independent of its source', () => {
+  const a = new AdjustLayer('vibrance', { amount: 40 });
+  a.opacity = .5;
+  a.blend = 'multiply';
+  const c = a.clone();
+  assert.equal(c.filter, 'vibrance');
+  assert.equal(c.opacity, .5);
+  assert.equal(c.blend, 'multiply');
+  assert.equal(c.id !== a.id, true);
+  c.params.amount = 90;
+  assert.equal(a.params.amount, 40, 'params must copy, not share');
+  c.visible = false;
+  assert.equal(a.visible, true, 'shared state must copy, not share');
+});
+
+test('setAdjustFilters injects the kernel registry for content rendering', () => {
+  setAdjustFilters(adjustable());
+  setAdjustFilters([]); // restore so later suite state is untouched
+});
+
+test('flatten and leaf counts treat adjustment layers as leaves', () => {
+  const adj = () => new AdjustLayer('exposure', null);
+  const tree = [group('A', [leaf('a1'), adj()]), adj()];
+  const flat = flattenLayers(tree);
+  assert.deepEqual(flat.map(l => l.type), ['group', 'raster', 'adjust', 'adjust']);
+  assert.equal(flat[2] instanceof AdjustLayer, true);
+  assert.equal(countLeaves(tree), 3);
+});
+
+test('groups nest adjustment layers and pass structural identity through', () => {
+  const a = new AdjustLayer('vibrance', { amount: 10 }, 'SAT');
+  const g = group('G', [leaf('a1'), a]);
+  const flat = flattenLayers([g]);
+  assert.deepEqual(flat.map(l => l.name), ['G', 'a1', 'SAT']);
+  assert.equal(countLeaves([g]), 2);
+  assert.equal(g.contains(a.id), true);
 });

@@ -1,13 +1,18 @@
 /* DEADPIXEL ui — menus, options bar, panels, dialogs, commands. */
 
-import { BLEND_MODES, Selection, hexToRgb, rgbToHex, hsvToRgb, rgbToHsv, clamp, makeCanvas } from './engine.js';
+import { BLEND_MODES, Selection, hexToRgb, rgbToHex, hsvToRgb, rgbToHsv, clamp, makeCanvas, setAdjustFilters } from './engine.js';
 import { TOOLS, toolById, iconSvg } from './tools.js';
 import { BRUSH_PRESETS, renderTip, STAMPS, renderStamp } from './brushes.js';
 import { FILTERS, filterById, defaultParams, applyFilterToLayer, applyFilterToLayerAsync, processFilterPixelsAsync, BUILTIN_ACTIONS, seeded, processingStats } from './filters.js';
 import { saveProjectFile, openDpx, exportDoc, downloadBlob, loadImageFile, docFromImage } from './io.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
-export const APP_VERSION = '1.8.0';
+export const APP_VERSION = '1.9.0';
+
+/* hand the adjustment kernels to the engine (compositor needs them; reverse
+   dependency lives in the doc's filter lookup to avoid the import cycle) */
+const ADJUSTABLE = FILTERS.filter(f => f.group === 'adjust');
+setAdjustFilters(ADJUSTABLE);
 const el = (tag, cls, html) => {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -179,6 +184,7 @@ export async function filterDialog(app, filterId) {
   const layer = D.activeLayer;
   if (!layer) return;
   if (layer.type === 'text') { toast('RASTERIZE TEXT LAYER FIRST (Layer ▸ Rasterize)', true); return; }
+  if (layer.type === 'adjust') { toast('ADJUSTMENT LAYER — FILTERS APPLY TO PIXEL LAYERS', true); return; }
   if (layer.locked) { toast('LAYER IS LOCKED', true); return; }
   const f = filterById(filterId);
   if (!f) return;
@@ -257,6 +263,55 @@ export async function filterDialog(app, filterId) {
     await D.withLayerSnapshotAsync(f.name, layer, () => applyFilterToLayerAsync(D, layer, filterId, params));
     app.noteFilter(filterId, params);
   }
+  app.requestRender();
+}
+
+/* ---- adjustment layers ---------------------------------------------------- */
+
+/* live, non-destructive param editor: slider ticks recompute the composite;
+   OK commits through history, Cancel restores the previous params */
+async function adjustmentLayerDialog(app, layer) {
+  const D = app.doc;
+  const f = filterById(layer.filter);
+  if (!f || layer.type !== 'adjust') return;
+  const before = { ...layer.params };
+  let previewTimer = null, generation = 0;
+  const applyPreview = () => {
+    clearTimeout(previewTimer);
+    const gen = ++generation;
+    previewTimer = setTimeout(() => {
+      if (gen !== generation) return;
+      layer._adjustCache = null;
+      D.changed();
+      app.requestRender();
+    }, 60);
+  };
+  const ok = await dialog(f.name.toUpperCase(), (body) => {
+    for (const p of f.params) {
+      const wrap = el('div', 'dlg-row');
+      wrap.appendChild(el('label', null, p.label));
+      const slider = el('input'); slider.type = 'range';
+      slider.min = p.min; slider.max = p.max; slider.step = p.step;
+      slider.value = layer.params[p.key] ?? p.def;
+      slider.className = 'grow';
+      const val = el('span', 'opt-val', String(slider.value));
+      slider.addEventListener('input', () => {
+        layer.params[p.key] = parseFloat(slider.value);
+        val.textContent = slider.value;
+        applyPreview();
+      });
+      wrap.append(slider, val);
+      body.appendChild(wrap);
+    }
+    body.appendChild(el('div', 'dlg-note', 'Adjusts every layer below this node. Paint its layer mask to limit where it bites.'));
+  }, [
+    { label: 'Cancel' },
+    { label: 'OK', primary: true, value: () => true },
+  ]);
+  clearTimeout(previewTimer);
+  if (ok) D.setAdjustParams(layer.id, { ...layer.params }, f.name);
+  else { layer.params = { ...before }; layer._adjustCache = null; D.changed(); }
+  app.refreshLayers?.();
   app.requestRender();
 }
 
@@ -466,7 +521,9 @@ export function buildCommands(app) {
     'layer.down': { label: 'Move Layer Down', key: null, run: needDoc(() => D().moveWithinSiblings(D()._activeId, -1)) },
     'layer.group': { label: 'Group Layers', key: 'Ctrl+G', run: needDoc(() => D().groupFromActive()) },
     'layer.clip': { label: 'Create Clipping Mask', key: 'Ctrl+Alt+G', run: needDoc(() => D().setClipped()) },
-    'layer.merge': { label: 'Merge Down', key: 'Ctrl+E', run: needDoc(() => D().mergeDown()) },
+    'layer.merge': { label: 'Merge Down', key: 'Ctrl+E', run: needDoc(() => {
+      if (D().mergeDown() === false) app.toast('ADJUSTMENT LAYERS MERGE ONTO PIXEL LAYERS ONLY', true);
+    }) },
     'layer.rasterizegroup': { label: 'Merge Group Contents', key: null, run: needDoc(() => {
       const l = D().activeLayer;
       if (l?.type === 'group') D().rasterizeGroup(null, 'Merge group');
@@ -528,6 +585,15 @@ export function buildCommands(app) {
   for (const f of FILTERS) {
     cmds['fx.' + f.id] = { label: f.name + (f.params.length ? '…' : ''), key: null, run: needDoc(() => filterDialog(app, f.id)) };
   }
+  // adjustment layers (LAYER > New Adjustment Layer)
+  for (const f of ADJUSTABLE) {
+    cmds['adj.' + f.id] = { label: f.name + (f.params.length ? '…' : ''), key: null, run: needDoc(() => {
+      const layer = D().addAdjustmentLayer(f.id, defaultParams(f.id), f.name);
+      app.refreshLayers();
+      app.requestRender();
+      adjustmentLayerDialog(app, layer);
+    }) };
+  }
   return cmds;
 }
 
@@ -539,6 +605,7 @@ const MENU_LAYOUT = [
     null, 'image.rot90', 'image.rot270', 'image.rot180', 'image.fliph', 'image.flipv']],
   ['LAYER', ['layer.new', 'layer.dupe', 'layer.delete', null, 'layer.up', 'layer.down', null,
     'layer.group', 'layer.clip',
+    { sub: 'NEW ADJUSTMENT LAYER', items: () => ADJUSTABLE.map(f => 'adj.' + f.id) },
     { sub: 'LAYER MASK', items: ['layer.maskreveal', 'layer.maskhide', 'layer.maskfromsel', 'layer.maskhidefromsel', null, 'layer.masktoggle', 'layer.maskapply', 'layer.maskdelete'] },
     null, 'layer.merge', 'layer.rasterizegroup', 'layer.rasterize', null, 'layer.flatten']],
   ['SELECT', ['select.all', 'select.none', 'select.invert', null, 'select.bycolor']],
@@ -1061,10 +1128,15 @@ function buildLayersPanel(app, host) {
     eye.addEventListener('click', (e) => { e.stopPropagation(); node.visible = !node.visible; D.changed(); });
     rowE.appendChild(eye);
 
-    const thumb = el('button', 'layer-thumb' + (isGroup ? ' folder' : '')); thumb.type = 'button';
+    const thumb = el('button', 'layer-thumb' + (isGroup ? ' folder' : '') + (node.type === 'adjust' ? ' adjust' : '')); thumb.type = 'button';
     if (isGroup) {
       thumb.title = `${node.children.length} layer${node.children.length === 1 ? '' : 's'} in group — drop layers here`;
       thumb.textContent = '▦';
+    } else if (node.type === 'adjust') {
+      const f = filterById(node.filter);
+      thumb.title = (f?.name || 'adjustment') + ' — click to edit parameters';
+      thumb.textContent = 'ƒ';
+      thumb.addEventListener('click', (e) => { e.stopPropagation(); adjustmentLayerDialog(app, node); });
     } else {
       const tc = el('canvas'); tc.width = 40; tc.height = 30;
       drawCanvasThumb(tc, node.canvas);
@@ -1112,8 +1184,9 @@ function buildLayersPanel(app, host) {
       clipTag.title = 'clipped to the layer below';
       rowE.appendChild(clipTag);
     }
-    const tag = el('span', 'layer-tag', node.type === 'text' ? 'T' : '');
+    const tag = el('span', 'layer-tag', node.type === 'text' ? 'T' : node.type === 'adjust' ? 'ƒ' : '');
     if (node.type === 'text') tag.title = 'text layer';
+    if (node.type === 'adjust') tag.title = 'adjustment layer';
     rowE.appendChild(tag);
     const lock = el('button', 'layer-lock' + (node.locked ? ' locked' : ''), node.locked ? '🔒' : '🔓');
     lock.type = 'button'; lock.title = 'lock layer';
@@ -1159,7 +1232,17 @@ function buildLayersPanel(app, host) {
     list.innerHTML = '';
     if (!D) return;
     const l = D.activeLayer;
-    if (l) { blend.value = l.blend; op.value = Math.round(l.opacity * 100); opv.textContent = op.value; }
+    if (l) {
+      // pass-through only exists for groups; everything else coerces to Normal
+      blend.innerHTML = '';
+      for (const [v, label] of BLEND_MODES) {
+        if (v === 'pass-through' && l.type !== 'group') continue;
+        const o = el('option', null, label); o.value = v;
+        blend.appendChild(o);
+      }
+      blend.value = l.blend === 'pass-through' && l.type !== 'group' ? 'source-over' : l.blend;
+      op.value = Math.round(l.opacity * 100); opv.textContent = op.value;
+    }
     const walk = (nodes, depth) => {
       for (let i = nodes.length - 1; i >= 0; i--) {
         const node = nodes[i];
@@ -1539,18 +1622,189 @@ function buildActionsPanel(app, host) {
   });
 }
 
+/* ---- navigator panel ------------------------------------------------------ */
+
+/* live thumbnail + draggable viewport box; click/drag centers the view */
+function buildNavigatorPanel(app, host) {
+  const [p, bodyEl] = panelShell('navigator', 'NAVIGATOR');
+  const wrap = el('div', 'nav-wrap');
+  const cv = el('canvas'); cv.id = 'nav-canvas';
+  const box = el('canvas'); box.id = 'nav-rect';
+  wrap.append(cv, box);
+  const controls = el('div', 'nav-ctrl');
+  const zoomOut = el('button', 'pbtn', '−'); zoomOut.title = 'zoom out';
+  const fitBtn = el('button', 'pbtn', 'FIT'); fitBtn.title = 'fit on screen';
+  const zoomIn = el('button', 'pbtn', '+'); zoomIn.title = 'zoom in';
+  const zoomPct = el('span', 'opt-val', '—');
+  controls.append(zoomOut, fitBtn, zoomIn, zoomPct);
+  bodyEl.append(wrap, controls);
+  host.appendChild(p);
+  const TW = 260, TH = 172;
+  cv.width = TW; cv.height = TH;
+  box.width = TW; box.height = TH;
+
+  const metrics = () => {
+    const D = app.doc;
+    if (!D) return null;
+    const scale = Math.min(TW / D.width, TH / D.height);
+    const w = D.width * scale, h = D.height * scale;
+    const ox = (TW - w) / 2, oy = (TH - h) / 2;
+    return { D, scale, w, h, ox, oy };
+  };
+
+  const drawThumb = () => {
+    const m = metrics();
+    if (!m) return;
+    const ctx = cv.getContext('2d');
+    ctx.clearRect(0, 0, TW, TH);
+    ctx.fillStyle = '#131313';
+    ctx.fillRect(m.ox - 1, m.oy - 1, m.w + 2, m.h + 2);
+    ctx.imageSmoothingQuality = 'medium';
+    ctx.drawImage(app.doc._compoCtx.canvas, m.ox, m.oy, m.w, m.h);
+  };
+
+  const drawRect = () => {
+    const m = metrics();
+    if (!m) return;
+    const ctx = box.getContext('2d');
+    ctx.clearRect(0, 0, TW, TH);
+    const { zoom, panX, panY } = app.view;
+    const vw = app.viewCanvas.width / app.dpr / zoom, vh = app.viewCanvas.height / app.dpr / zoom;
+    const x0 = (Math.max(0, -panX / zoom)) * m.scale + m.ox;
+    const y0 = (Math.max(0, -panY / zoom)) * m.scale + m.oy;
+    const w = Math.min(m.w, vw * m.scale), h = Math.min(m.h, vh * m.scale);
+    ctx.strokeStyle = '#0d84ff';
+    ctx.strokeRect(x0 + .5, y0 + .5, w - 1, h - 1);
+    zoomPct.textContent = Math.round(zoom * 100) + '%';
+  };
+
+  const seek = (e) => {
+    const m = metrics();
+    if (!m) return;
+    const r = box.getBoundingClientRect();
+    const nx = clamp((e.clientX - r.left) * (TW / r.width), 0, TW);
+    const ny = clamp((e.clientY - r.top) * (TH / r.height), 0, TH);
+    const { zoom } = app.view;
+    // center the viewport on the sampled point
+    const dx = (nx - m.ox) / m.scale, dy = (ny - m.oy) / m.scale;
+    app.view.panX = -dx * zoom + app.viewCanvas.width / app.dpr / 2;
+    app.view.panY = -dy * zoom + app.viewCanvas.height / app.dpr / 2;
+    app.requestRender();
+  };
+  box.addEventListener('pointerdown', (e) => { box.setPointerCapture(e.pointerId); seek(e); });
+  box.addEventListener('pointermove', (e) => { if (e.buttons & 1) seek(e); });
+  zoomOut.addEventListener('click', () => { app.zoomAt(null, null, 1 / 1.25); app.requestRender(); });
+  zoomIn.addEventListener('click', () => { app.zoomAt(null, null, 1.25); app.requestRender(); });
+  fitBtn.addEventListener('click', () => { app.fitView(); app.requestRender(); });
+
+  app.renderNav = () => {
+    if (!app.doc) return;
+    const mode = bodyEl.closest('.panel-mode'); // visibility lives on the tab body, not this shell
+    if (!mode?.classList.contains('on')) return;
+    if (app._navThumbDirty) {
+      app._navThumbDirty = false;
+      drawThumb();
+    }
+    drawRect();
+  };
+}
+
+/* ---- histogram panel ------------------------------------------------------ */
+
+/* luminance (or RGB) histogram from a 256×160 downsample of the composite */
+function buildHistogramPanel(app, host) {
+  const [p, bodyEl] = panelShell('histogram', 'HISTOGRAM');
+  const seg = el('div', 'seg hist-mode');
+  const lumBtn = el('button', 'on', 'LUM'); lumBtn.type = 'button';
+  const rgbBtn = el('button', null, 'RGB'); rgbBtn.type = 'button';
+  seg.append(lumBtn, rgbBtn);
+  const cv = el('canvas'); cv.id = 'hist-canvas';
+  const info = el('div', 'opt-val hist-info', '—');
+  bodyEl.append(seg, cv, info);
+  host.appendChild(p);
+  cv.width = 256; cv.height = 128;
+  let mode = 'lum';
+  const setMode = (m) => {
+    mode = m;
+    lumBtn.classList.toggle('on', m === 'lum');
+    rgbBtn.classList.toggle('on', m === 'rgb');
+    app._histogramDirty = true;
+    app.requestRender();
+  };
+  lumBtn.addEventListener('click', () => setMode('lum'));
+  rgbBtn.addEventListener('click', () => setMode('rgb'));
+
+  app.renderHistogram = () => {
+    const D = app.doc;
+    if (!D) return;
+    if (!bodyEl.closest('.panel-mode')?.classList.contains('on')) return; // visibility lives on the tab body
+    const samp = makeCanvas(256, 160);
+    const sctx = samp.getContext('2d', { willReadFrequently: true });
+    try { sctx.drawImage(D._compoCtx.canvas, 0, 0, 256, 160); } catch (_) { return; }
+    const data = sctx.getImageData(0, 0, 256, 160).data;
+    const bins = mode === 'lum'
+      ? { lum: new Uint32Array(256) }
+      : { r: new Uint32Array(256), g: new Uint32Array(256), b: new Uint32Array(256) };
+    let sum = 0, area = 0;
+    const lums = new Uint8Array(256 * 160);
+    for (let i = 0, px = 0; i < data.length; i += 4, px++) {
+      const a = data[i + 3];
+      if (!a) continue;
+      lums[area] = data[i] * .299 + data[i + 1] * .587 + data[i + 2] * .114;
+      sum += lums[area]; area++;
+      if (mode === 'lum') bins.lum[lums[area - 1]]++;
+      else { bins.r[data[i]]++; bins.g[data[i + 1]]++; bins.b[data[i + 2]]++; }
+    }
+    const ctx = cv.getContext('2d');
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.fillStyle = '#191919';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.strokeStyle = 'rgba(255,255,255,.07)';
+    for (let g = 1; g < 4; g++) {
+      ctx.beginPath(); ctx.moveTo(g * 64 + .5, 0); ctx.lineTo(g * 64 + .5, cv.height); ctx.stroke();
+    }
+    const histMax = arr => Math.max(1, ...arr.slice(1, 255)); // clip outliers at the extremes
+    if (mode === 'lum') {
+      const peak = histMax(bins.lum);
+      ctx.fillStyle = 'rgba(212,212,212,.85)';
+      const step = cv.width / 256;
+      for (let v = 0; v < 256; v++) {
+        const bh = Math.round(Math.sqrt(bins.lum[v] / peak) * (cv.height - 4));
+        ctx.fillRect(v * step, cv.height - bh, step, bh);
+      }
+    } else {
+      const peak = Math.max(histMax(bins.r), histMax(bins.g), histMax(bins.b));
+      const step = cv.width / 256;
+      ctx.globalCompositeOperation = 'lighter';
+      [['r', 'rgba(220,70,70,.6)'], ['g', 'rgba(70,200,90,.6)'], ['b', 'rgba(80,130,255,.6)']].forEach(([k, color]) => {
+        ctx.fillStyle = color;
+        for (let v = 0; v < 256; v++) {
+          const bh = Math.round(Math.sqrt(bins[k][v] / peak) * (cv.height - 4));
+          ctx.fillRect(v * step, cv.height - bh, step, bh);
+        }
+      });
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    if (area) {
+      const mean = Math.round(sum / area);
+      const mid = Array.from(lums.slice(0, area)).sort((x, y) => x - y)[area >> 1];
+      info.textContent = `MEAN ${mean} · MEDIAN ${mid} · PIXELS ${(area).toLocaleString()}@¼`;
+    } else info.textContent = 'EMPTY';
+  };
+}
+
 export function buildPanels(app) {
   const host = $('#panels');
   host.innerHTML = '';
   /* two stacked tab groups, Photoshop-style: Color/Brush/Signal on top,
-     Layers/History below (the layers list is the tall one) */
+     Navigator/Layers/Histogram/History below (the layers list is the tall one) */
   const topTabs = el('div', 'panel-tabs');
   const bottomTabs = el('div', 'panel-tabs');
   host.append(topTabs, bottomTabs);
-  const labels = { color: 'COLOR', brush: 'BRUSH', signal: 'SIGNAL RACK', layers: 'LAYERS', history: 'HISTORY' };
+  const labels = { color: 'COLOR', brush: 'BRUSH', signal: 'SIGNAL RACK', navigator: 'NAVIGATOR', layers: 'LAYERS', histogram: 'HISTOGRAM', history: 'HISTORY' };
   const groups = {
     top: { order: ['color', 'brush', 'signal'], tabs: {}, current: 'color' },
-    bottom: { order: ['layers', 'history'], tabs: {}, current: 'layers' },
+    bottom: { order: ['navigator', 'layers', 'histogram', 'history'], tabs: {}, current: 'layers' },
   };
   const bodies = {};
   for (const [name, g] of Object.entries(groups)) {
@@ -1566,7 +1820,7 @@ export function buildPanels(app) {
     }
   }
   topTabs.append(groups.top.tabs.color, groups.top.tabs.brush, groups.top.tabs.signal);
-  bottomTabs.append(groups.bottom.tabs.layers, groups.bottom.tabs.history);
+  bottomTabs.append(groups.bottom.tabs.navigator, groups.bottom.tabs.layers, groups.bottom.tabs.histogram, groups.bottom.tabs.history);
   const activate = (groupName, mode) => {
     const g = groups[groupName];
     g.current = mode;
@@ -1576,6 +1830,8 @@ export function buildPanels(app) {
     }
     if (mode === 'signal') app.refreshActions?.();
     if (mode === 'layers') app.refreshLayers?.();
+    if (mode === 'navigator') app._navThumbDirty = true;
+    if (mode === 'histogram') app._histogramDirty = true;
   };
   app.activatePanelMode = (mode) => {
     if (groups.top.order.includes(mode)) return activate('top', mode);
@@ -1583,7 +1839,9 @@ export function buildPanels(app) {
   };
   buildColorPanel(app, bodies.color);
   buildBrushPanel(app, bodies.brush);
+  buildNavigatorPanel(app, bodies.navigator);
   buildLayersPanel(app, bodies.layers);
+  buildHistogramPanel(app, bodies.histogram);
   buildHistoryPanel(app, bodies.history);
   buildActionsPanel(app, bodies.signal);
 }

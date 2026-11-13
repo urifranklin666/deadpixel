@@ -21,7 +21,7 @@ export function copyCanvas(src) {
 }
 
 export const BLEND_MODES = [
-  ['source-over', 'Normal'], ['multiply', 'Multiply'], ['screen', 'Screen'],
+  ['pass-through', 'Pass Through'], ['source-over', 'Normal'], ['multiply', 'Multiply'], ['screen', 'Screen'],
   ['overlay', 'Overlay'], ['darken', 'Darken'], ['lighten', 'Lighten'],
   ['color-dodge', 'Color Dodge'], ['color-burn', 'Color Burn'],
   ['hard-light', 'Hard Light'], ['soft-light', 'Soft Light'],
@@ -193,6 +193,7 @@ export class GroupLayer {
 }
 
 function boundsOf(layer) {
+  if (layer.type === 'adjust') return null; // full-canvas extent
   if (layer.type === 'text') return textBounds(layer);
   const w = layer.canvas.width, h = layer.canvas.height;
   const d = layer.ctx.getImageData(0, 0, w, h).data;
@@ -216,6 +217,36 @@ function textBounds(layer) {
 }
 
 /* ------------------------------------------------------------- tree utils */
+
+/* adjustment kernels are injected once from filters.js (which imports this
+   module, so the reference must point back) */
+let ADJUST_FILTERS = [];
+export function setAdjustFilters(list) { ADJUST_FILTERS = list || []; }
+function adjustDefaults(filterId) {
+  const f = ADJUST_FILTERS.find(x => x.id === filterId);
+  const p = {};
+  (f?.params || []).forEach(pr => p[pr.key] = pr.def);
+  return p;
+}
+
+/* adjustment layer: a full-canvas color op applied to everything below it
+   inside its own sibling list. Carries a filter id + params; the visible
+   content is computed by the compositor against the backdrop below. */
+export class AdjustLayer {
+  constructor(filterId = null, params = null, name = null) {
+    baseLayerState(this, name || 'Adjustment');
+    this.type = 'adjust';
+    this.filter = filterId;
+    this.params = params ? { ...params } : {};
+  }
+  clone() {
+    const c = new AdjustLayer(this.filter, null, this.name);
+    copyShared(this, c);
+    c.params = { ...this.params };
+    return c;
+  }
+  contains(id) { return id === this.id; }
+}
 
 export function flattenLayers(list, out = []) {
   for (const l of list) { out.push(l); if (l.type === 'group') flattenLayers(l.children, out); }
@@ -514,6 +545,9 @@ export class Doc extends EventTarget {
   /* --------------------------- compositing core --------------------------- */
   /* signature of a subtree — anything that changes its rendered output */
   _nodeSig(l) {
+    if (l.type === 'adjust') {
+      return `A[${l.id}:${l.filter}:${JSON.stringify(l.params || {})}:${l.visible ? 1 : 0}:${l.opacity}:${l.blend}:${l.clipped ? 1 : 0}:${this._maskSig(l)}]`;
+    }
     if (l.type === 'group') {
       return 'G{'
         + `${l.id}:${l.visible?1:0}:${l.opacity}:${l.blend}:${l.clipped?1:0}`
@@ -610,42 +644,92 @@ export class Doc extends EventTarget {
     return c;
   }
 
+  /* adjustment output: the filter applied to the backdrop accumulated so
+     far, then masked by the adjustment's layer mask. Cached on
+     `backdropKey | filter | params | visibility | maskSig`. */
+  _adjustContent(l, below, belowKey) {
+    const key = belowKey + '|' + (l.filter || 'none') + '|' + JSON.stringify(l.params || {})
+      + '|' + (l.visible ? 1 : 0) + ':' + this._maskSig(l);
+    if (l._adjustCache?.key === key) { l._contentKey = 'ad' + key; return l._adjustCache.canvas; }
+    if (!l.visible) { l._contentKey = 'ad' + key; return null; }
+    const f = ADJUST_FILTERS.find(x => x.id === l.filter);
+    if (!f) { l._contentKey = 'ad' + key; l._adjustCache = { canvas: below, key, passthrough: true }; return below; }
+    const out = copyCanvas(below);
+    const octx = out.getContext('2d', { willReadFrequently: true });
+    const img = octx.getImageData(0, 0, this.width, this.height);
+    f.apply(img, this.width, this.height, { ...adjustDefaults(l.filter), ...(l.params || {}) });
+    octx.putImageData(img, 0, 0);
+    if (l.mask && l.maskEnabled) {
+      octx.globalCompositeOperation = 'destination-in';
+      octx.drawImage(l.mask, 0, 0);
+      octx.globalCompositeOperation = 'source-over';
+    }
+    l._adjustCache = { canvas: out, key };
+    l._contentKey = 'ad' + key;
+    return out;
+  }
+
+  /* blend a content canvas onto the workspace ctx honoring the node's
+     blend mode (pass-through coerced for non-groups) and opacity */
+  _blendOnto(ctx, content, blend, opacity) {
+    const gco = blend === 'pass-through' ? 'source-over' : blend;
+    ctx.globalAlpha = opacity;
+    ctx.globalCompositeOperation = gco;
+    ctx.drawImage(content, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
   /* draw a sibling list (root or inside a group) honoring clip chains */
   _renderLayers(list, ctx, preview = false, onReady = null) {
     let clipBase = null;
+    let accKey = ''; // identity of the backdrop: every drawn node's content key
     for (let i = 0; i < list.length; i++) {
       const l = list[i];
       if (!l.visible || l.opacity <= 0) continue;
-      const content = this._layerContent(l, preview, onReady);
-      if (l.clipped && clipBase) {
-        if (l.blend === 'source-over' && l.opacity >= 1) {
-          const scratch = copyCanvas(content);
-          scratch.getContext('2d').globalCompositeOperation = 'destination-in';
-          scratch.getContext('2d').drawImage(clipBase, 0, 0);
-          ctx.drawImage(scratch, 0, 0);
-        } else {
-          // blend against the backdrop below, then keep only the base's alpha
-          const R = makeCanvas(this.width, this.height);
-          const rctx = R.getContext('2d');
-          rctx.drawImage(ctx.canvas, 0, 0);
-          rctx.globalAlpha = l.opacity;
-          rctx.globalCompositeOperation = l.blend;
-          rctx.drawImage(content, 0, 0);
-          rctx.globalAlpha = 1;
-          rctx.globalCompositeOperation = 'destination-in';
-          rctx.drawImage(clipBase, 0, 0);
-          ctx.drawImage(R, 0, 0);
+      /* pass-through groups paint their children straight onto the backdrop
+         (no buffer, no group blend); falls back to the buffer path when the
+         group has masking/fx/opacity/clip interactions */
+      if (l.type === 'group' && l.blend === 'pass-through'
+        && l.opacity >= 1 && !l.mask && !l.effects?.length && !l._effectsBypassed) {
+        const laterClipped = list.slice(i + 1).some(s => s.clipped && s.visible && s.opacity > 0);
+        if (!laterClipped && !l.clipped) {
+          this._renderLayers(l.children, ctx, preview, onReady);
+          accKey += '|pt' + this._nodeSig(l);
+          continue;
         }
-      } else {
-        ctx.globalAlpha = l.opacity;
-        ctx.globalCompositeOperation = l.blend;
-        ctx.drawImage(content, 0, 0);
-        ctx.globalAlpha = 1;
-        ctx.globalCompositeOperation = 'source-over';
+      }
+      const content = l.type === 'adjust'
+        ? this._adjustContent(l, ctx.canvas, accKey)
+        : this._layerContent(l, preview, onReady);
+      if (content) {
+        if (l.clipped && clipBase) {
+          if (l.blend !== 'source-over' || l.opacity < 1) {
+            // blend against the backdrop below, then keep only the base's alpha
+            const R = makeCanvas(this.width, this.height);
+            const rctx = R.getContext('2d');
+            rctx.drawImage(ctx.canvas, 0, 0);
+            rctx.globalAlpha = l.opacity;
+            rctx.globalCompositeOperation = l.blend === 'pass-through' ? 'source-over' : l.blend;
+            rctx.drawImage(content, 0, 0);
+            rctx.globalAlpha = 1;
+            rctx.globalCompositeOperation = 'destination-in';
+            rctx.drawImage(clipBase, 0, 0);
+            ctx.drawImage(R, 0, 0);
+          } else {
+            const scratch = copyCanvas(content);
+            scratch.getContext('2d').globalCompositeOperation = 'destination-in';
+            scratch.getContext('2d').drawImage(clipBase, 0, 0);
+            ctx.drawImage(scratch, 0, 0);
+          }
+        } else {
+          this._blendOnto(ctx, content, l.blend, l.opacity);
+        }
         // a clip source is only needed when a later sibling is actually clipped
         const laterClipped = list.slice(i + 1).some(s => s.clipped && s.visible && s.opacity > 0);
         if (laterClipped && !l.clipped) clipBase = this._clipSource(l, content);
         else if (l.clipped) clipBase = clipBase;
+        accKey += '|' + (l._contentKey || l.id);
       }
     }
   }
@@ -778,6 +862,32 @@ export class Doc extends EventTarget {
     return g;
   }
 
+  /* adjustment layer placed above the active node; params default from the
+     injected registry so an empty params map matches the kernel defaults */
+  addAdjustmentLayer(filterId, params = null, name = null) {
+    const { list, index } = this._locateActive();
+    const a = new AdjustLayer(filterId, params, name || filterId);
+    this._structural('New adjustment layer', () => {
+      list.splice(index + 1, 0, a);
+      this._activeId = a.id;
+    });
+    return a;
+  }
+
+  /* edit an adjustment layer's params (history-tracked; caches invalidated) */
+  setAdjustParams(id, params, label = 'Adjustment') {
+    const l = this.findLayer(id);
+    if (!l || l.type !== 'adjust') return;
+    const before = { ...l.params };
+    const after = { ...params };
+    this.history.push(label,
+      () => { l.params = { ...before }; l._adjustCache = null; this.changed(); },
+      () => { l.params = { ...after }; l._adjustCache = null; this.changed(); });
+    l.params = { ...after };
+    l._adjustCache = null;
+    this.changed();
+  }
+
   groupFromActive() { // Ctrl+G: put the active node into a new group
     const { list, index } = this._locateActive();
     const active = list[index];
@@ -866,18 +976,43 @@ export class Doc extends EventTarget {
 
   mergeDown(id = null) {
     const at = this.locate(id ?? this._activeId);
-    if (!at || at.index <= 0) return;
+    if (!at || at.index <= 0) return false;
     const top = at.list[at.index], bottom = at.list[at.index - 1];
+    if (bottom.type === 'adjust') return false; // bake only onto pixel content
+    if (top.type === 'adjust') {
+      // bake the adjustment into the pair, removing both nodes
+      if (top.clipped) return false;
+      const merged = new Layer(this.width, this.height, bottom.name);
+      merged.clipped = bottom.clipped;
+      merged.ctx.globalAlpha = bottom.opacity;
+      merged.ctx.globalCompositeOperation = bottom.blend === 'pass-through' ? 'source-over' : bottom.blend;
+      if (bottom.visible) merged.ctx.drawImage(this._layerContent(bottom), 0, 0);
+      merged.ctx.globalAlpha = 1;
+      merged.ctx.globalCompositeOperation = 'source-over';
+      if (top.visible) {
+        const adjusted = this._adjustContent(top, merged, 'bake|' + (bottom._contentKey || bottom.id));
+        merged.ctx.globalAlpha = top.opacity;
+        merged.ctx.globalCompositeOperation = top.blend === 'pass-through' ? 'source-over' : top.blend;
+        merged.ctx.drawImage(adjusted, 0, 0);
+        merged.ctx.globalAlpha = 1;
+        merged.ctx.globalCompositeOperation = 'source-over';
+      }
+      this._structural('Merge down', () => {
+        at.list.splice(at.index - 1, 2, merged);
+        this._activeId = merged.id;
+      });
+      return true;
+    }
     const bottomContent = this._layerContent(bottom);
     const merged = new Layer(this.width, this.height, bottom.name);
     merged.visible = true;
     merged.opacity = bottom.opacity !== 1 || bottom.blend !== 'source-over' ? 1 : bottom.opacity;
     merged.clipped = bottom.clipped;
     merged.ctx.globalAlpha = bottom.opacity;
-    merged.ctx.globalCompositeOperation = bottom.blend;
+    merged.ctx.globalCompositeOperation = bottom.blend === 'pass-through' ? 'source-over' : bottom.blend;
     if (bottom.visible) merged.ctx.drawImage(bottomContent, 0, 0);
     merged.ctx.globalAlpha = top.opacity;
-    merged.ctx.globalCompositeOperation = top.blend;
+    merged.ctx.globalCompositeOperation = top.blend === 'pass-through' ? 'source-over' : top.blend;
     if (top.visible) merged.ctx.drawImage(this._layerContent(top), 0, 0);
     merged.ctx.globalAlpha = 1;
     merged.ctx.globalCompositeOperation = 'source-over';
@@ -885,6 +1020,7 @@ export class Doc extends EventTarget {
       at.list.splice(at.index - 1, 2, merged);
       this._activeId = merged.id;
     });
+    return true;
   }
 
   /* rasterize a group into one layer (PS "Merge Group") */
@@ -944,6 +1080,7 @@ export class Doc extends EventTarget {
     if (!l) return;
     const walk = (node) => {
       if (node.type === 'group') { node.children.forEach(walk); return; }
+      if (node.type === 'adjust') return; // full-canvas extent, nothing to shift
       if (node.type === 'text') { node.t.x += dx; node.t.y += dy; node.render(); }
       else node.rebase(node.canvas.width, node.canvas.height, dx, dy);
     };
@@ -1215,6 +1352,15 @@ export class Doc extends EventTarget {
       };
       this._transformSignalMasks(w, h, stretch);
       this.layers = this._geoTree(this.layers, (l) => {
+        if (l.type === 'adjust') {
+          const nl = l.clone(); nl.name = l.name;
+          if (l.mask) {
+            nl.mask = makeCanvas(w, h);
+            stretch(nl.mask.getContext('2d'), l.mask, l.mask.width, l.mask.height);
+            nl.maskRevision = l.maskRevision + 1;
+          } else nl.mask = null;
+          return nl;
+        }
         if (l.type === 'text') return this._resizeText(l, w, h, sx, sy);
         const nl = l.clone(); nl.name = l.name;
         nl.resize(w, h, smooth);
@@ -1267,6 +1413,15 @@ export class Doc extends EventTarget {
       const place = (ctx, src) => ctx.drawImage(src, dx, dy);
       this._transformSignalMasks(w, h, place);
       this.layers = this._geoTree(this.layers, (l) => {
+        if (l.type === 'adjust') {
+          const nl = l.clone(); nl.name = l.name;
+          if (l.mask) {
+            nl.mask = makeCanvas(w, h);
+            place(nl.mask.getContext('2d'), l.mask);
+            nl.maskRevision = l.maskRevision + 1;
+          } else nl.mask = null;
+          return nl;
+        }
         if (l.type === 'text') return this._geoTextLeaf(l, w, h, place, (t) => { t.x += dx; t.y += dy; });
         const nl = l.clone(); nl.name = l.name;
         nl.rebase(w, h, dx, dy);
@@ -1282,6 +1437,15 @@ export class Doc extends EventTarget {
       const place = (ctx, src) => ctx.drawImage(src, -x, -y);
       this._transformSignalMasks(w, h, place);
       this.layers = this._geoTree(this.layers, (l) => {
+        if (l.type === 'adjust') {
+          const nl = l.clone(); nl.name = l.name;
+          if (l.mask) {
+            nl.mask = makeCanvas(w, h);
+            place(nl.mask.getContext('2d'), l.mask);
+            nl.maskRevision = l.maskRevision + 1;
+          } else nl.mask = null;
+          return nl;
+        }
         if (l.type === 'text') return this._geoTextLeaf(l, w, h, place, (t) => { t.x -= x; t.y -= y; });
         const nl = l.clone(); nl.name = l.name;
         nl.rebase(w, h, -x, -y);
@@ -1303,6 +1467,15 @@ export class Doc extends EventTarget {
       };
       this._transformSignalMasks(w, h, (ctx, src) => rot(ctx, src, src.width, src.height));
       this.layers = this._geoTree(this.layers, (l) => {
+        if (l.type === 'adjust') {
+          const nl = l.clone(); nl.name = l.name;
+          if (l.mask) {
+            nl.mask = makeCanvas(w, h);
+            rot(nl.mask.getContext('2d'), l.mask, l.mask.width, l.mask.height);
+            nl.maskRevision = l.maskRevision + 1;
+          } else nl.mask = null;
+          return nl;
+        }
         const nl = l.type === 'text' ? l.rasterize() : l.clone();
         nl.name = l.name;
         nl.geoTransform(w, h, rot);
@@ -1323,6 +1496,15 @@ export class Doc extends EventTarget {
       };
       this._transformSignalMasks(w, h, (ctx, src) => flip(ctx, src, src.width, src.height));
       this.layers = this._geoTree(this.layers, (l) => {
+        if (l.type === 'adjust') {
+          const nl = l.clone(); nl.name = l.name;
+          if (l.mask) {
+            nl.mask = makeCanvas(w, h);
+            flip(nl.mask.getContext('2d'), l.mask, l.mask.width, l.mask.height);
+            nl.maskRevision = l.maskRevision + 1;
+          } else nl.mask = null;
+          return nl;
+        }
         const nl = l.type === 'text' ? l.rasterize() : l.clone();
         nl.name = l.name;
         nl.geoTransform(w, h, flip);

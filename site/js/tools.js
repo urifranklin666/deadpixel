@@ -46,6 +46,7 @@ function paintableLayer(app) {
   if (l.locked) { app.toast('LAYER IS LOCKED', true); return null; }
   if (l.type === 'group') { app.toast("CAN'T PAINT ON A GROUP — SELECT A LAYER", true); return null; }
   if (l.type === 'text') { app.toast('TEXT LAYER — RASTERIZE TO PAINT (Layer ▸ Rasterize)', true); return null; }
+  if (l.type === 'adjust') { app.toast('ADJUSTMENT LAYER — EDIT ITS PARAMETERS (CLICK THE ƒ THUMB)', true); return null; }
   return l;
 }
 
@@ -94,6 +95,7 @@ T({
   onDown(app, p) {
     const l = app.doc.activeLayer;
     if (!l || l.locked) { if (l?.locked) app.toast('LAYER IS LOCKED', true); return; }
+    if (l.type === 'adjust') return; // full-canvas node — nothing to drag
     this.start = p;
     if (l.type === 'group') {
       // whole subtree moves via incremental translates; history on up
@@ -320,7 +322,7 @@ T({
 
   sourceImage(app) {
     const D = app.doc;
-    const canvas = this.state.source === 'layer' && D.activeLayer ? D.activeLayer.canvas : D.compose();
+    const canvas = this.state.source === 'layer' && D.activeLayer?.canvas ? D.activeLayer.canvas : D.compose();
     return canvas.getContext('2d').getImageData(0, 0, D.width, D.height);
   },
   compute(app, p, force = false) {
@@ -1047,6 +1049,7 @@ export const transformTool = {
     if (layer.locked) { app.toast('LAYER IS LOCKED', true); return false; }
     if (layer.type === 'group') { D.rasterizeGroup(null, 'Rasterize group'); layer = D.activeLayer; app.toast('GROUP RASTERIZED FOR TRANSFORM'); }
     if (layer.type === 'text') { D.rasterizeLayer(); layer = D.activeLayer; app.toast('TEXT RASTERIZED FOR TRANSFORM'); }
+    if (layer.type === 'adjust') { app.toast('ADJUSTMENT LAYER — MOVE IT OR EDIT ITS MASK INSTEAD', true); return false; }
     // find content bounds
     const w = layer.canvas.width, h = layer.canvas.height;
     const d = layer.ctx.getImageData(0, 0, w, h).data;
