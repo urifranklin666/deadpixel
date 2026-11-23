@@ -841,3 +841,187 @@ test('phase 2 tools and commands are wired into the shell', async ({ page }) => 
   await page.evaluate(() => window.deadpixel.setQuickMask(false));
   await expect(page.locator('#optionsbar')).not.toContainText('QUICK MASK');
 });
+
+test('export completes a pending layer rack and ignores stale preview pixels', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { Doc, makeCanvas } = await import('/js/engine.js');
+    const { exportDoc } = await import('/js/io.js');
+    const doc = new Doc(1, 1, { bg: '#f00' });
+    const layer = doc.activeLayer;
+    layer.effects = [{ id: 'pending' }];
+    doc.effectProcessor = canvas => {
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#0f0';
+      ctx.fillRect(0, 0, 1, 1);
+    };
+    let finishPreview;
+    doc.effectProcessorAsync = () => new Promise(resolve => { finishPreview = resolve; });
+    const processing = [];
+    doc.onProcessingChange = active => processing.push(active);
+    const pixel = canvas => Array.from(canvas.getContext('2d').getImageData(0, 0, 1, 1).data);
+    const preview = pixel(doc.composePreview());
+    const exportedPixel = async () => {
+      const decoded = await createImageBitmap(await exportDoc(doc));
+      const canvas = makeCanvas(1, 1);
+      canvas.getContext('2d').drawImage(decoded, 0, 0);
+      decoded.close();
+      return pixel(canvas);
+    };
+    const exported = await exportedPixel();
+    finishPreview(new Uint8ClampedArray([0, 0, 255, 255]));
+    await Promise.resolve();
+    const final = pixel(doc.composePreview());
+    doc.setEffectBypass(layer, true);
+    const exportedDuringBypass = await exportedPixel();
+    const bypassed = pixel(doc.composePreview());
+    doc.setEffectBypass(layer, false);
+    doc.replaceLayerEffects(layer, [{ id: 'next-preview' }]);
+    const viewport = doc.composePreview();
+    finishPreview(new Uint8ClampedArray([0, 0, 255, 255]));
+    await Promise.resolve();
+    const settledPreview = pixel(viewport);
+    const fullAfterPreview = await exportedPixel();
+    return { preview, exported, exportedDuringBypass, bypassed, final, settledPreview, fullAfterPreview, processing };
+  });
+  expect(result).toEqual({
+    preview: [255, 0, 0, 255],
+    exported: [0, 255, 0, 255],
+    exportedDuringBypass: [0, 255, 0, 255],
+    bypassed: [255, 0, 0, 255],
+    final: [0, 255, 0, 255],
+    settledPreview: [0, 0, 255, 255],
+    fullAfterPreview: [0, 255, 0, 255],
+    processing: [true, false, true, false],
+  });
+});
+
+test('flatten applies the document rack once and undo restores the editable rack', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { Doc } = await import('/js/engine.js');
+    const doc = new Doc(1, 1, { bg: 'rgb(20, 0, 0)' });
+    doc.addLayer();
+    doc.replaceEffects([{ id: 'add-red' }], 'Rack', 99);
+    doc.effectProcessor = canvas => {
+      const ctx = canvas.getContext('2d');
+      const pixels = ctx.getImageData(0, 0, 1, 1);
+      pixels.data[0] += 30;
+      ctx.putImageData(pixels, 0, 0);
+    };
+    const state = () => ({
+      red: doc.compose().getContext('2d').getImageData(0, 0, 1, 1).data[0],
+      layers: doc.layers.length,
+      effects: doc.effects.length,
+      seed: doc.signalSeed,
+    });
+    const before = state();
+    doc.flatten();
+    const flattened = state();
+    doc.history.undo();
+    const undone = state();
+    doc.history.redo();
+    return { before, flattened, undone, redone: state() };
+  });
+  const original = { red: 50, layers: 2, effects: 1, seed: 99 };
+  const flattened = { ...original, layers: 1, effects: 0 };
+  expect(result).toEqual({ before: original, flattened, undone: original, redone: flattened });
+});
+
+test('merge group bakes its rack and keeps a soft mask editable', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { Doc, makeCanvas } = await import('/js/engine.js');
+    const doc = new Doc(1, 1, { bg: '#f00' });
+    const group = doc.groupFromActive();
+    group.effects = [{ id: 'group-rack' }];
+    doc.effectProcessor = canvas => {
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#00f';
+      ctx.fillRect(0, 0, 1, 1);
+    };
+    group.mask = makeCanvas(1, 1);
+    const maskCtx = group.mask.getContext('2d');
+    maskCtx.fillStyle = 'rgba(255,255,255,0.5)';
+    maskCtx.fillRect(0, 0, 1, 1);
+    const pixel = () => Array.from(doc.compose().getContext('2d').getImageData(0, 0, 1, 1).data);
+    const before = pixel();
+    const merged = doc.rasterizeGroup(group.id);
+    const after = pixel();
+    merged.maskEnabled = false;
+    doc.changed();
+    return { before, after, unmasked: pixel(), effects: merged.effects.length };
+  });
+  expect(result.before).toEqual([0, 0, 255, 128]);
+  expect(result.after).toEqual(result.before);
+  expect(result.unmasked).toEqual([0, 0, 255, 255]);
+  expect(result.effects).toBe(0);
+});
+
+test('Merge Group Contents explains why a backdrop-dependent Pass Through group cannot be baked', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { Doc } = await import('/js/engine.js');
+    const app = window.deadpixel;
+    const doc = new Doc(1, 1, { bg: '#f00' });
+    const overlay = doc.addLayer();
+    overlay.ctx.fillStyle = '#00f';
+    overlay.ctx.fillRect(0, 0, 1, 1);
+    overlay.blend = 'multiply';
+    const group = doc.groupFromActive();
+    group.blend = 'pass-through';
+    doc.setActiveId(group.id);
+    app.attachDoc(doc);
+    const history = doc.history.index;
+    app.cmd['layer.rasterizegroup'].run();
+    return { sameGroup: doc.activeLayer === group, sameHistory: doc.history.index === history };
+  });
+  expect(result).toEqual({ sameGroup: true, sameHistory: true });
+  await expect(page.getByText('PASS THROUGH NEEDS LAYERS OUTSIDE THIS GROUP')).toBeVisible();
+});
+
+test('merge down preserves ordinary pairs and refuses an adjustment that also affects earlier siblings', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { Doc } = await import('/js/engine.js');
+    const doc = new Doc(2, 1, { bg: '#f00' });
+    const middle = doc.addLayer();
+    middle.ctx.fillStyle = '#00f';
+    middle.ctx.fillRect(0, 0, 1, 1);
+    const pixel = () => Array.from(doc.compose().getContext('2d').getImageData(0, 0, 2, 1).data);
+    doc.addAdjustmentLayer('invert');
+    const before = pixel();
+    const index = doc.history.index;
+    const refused = !doc.mergeDown();
+    const untouched = index === doc.history.index && doc.layers.length === 3 && pixel().every((value, i) => value === before[i]);
+    doc.history.undo();
+    const plain = pixel();
+    const merged = doc.mergeDown();
+    return { refused, untouched, merged, plain, after: pixel(), layers: doc.layers.length };
+  });
+  expect(result).toEqual({
+    refused: true,
+    untouched: true,
+    merged: true,
+    plain: [0, 0, 255, 255, 255, 0, 0, 255],
+    after: [0, 0, 255, 255, 255, 0, 0, 255],
+    layers: 1,
+  });
+});
+
+test('an adjustment sees changes to the layers below it inside a group', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { Doc } = await import('/js/engine.js');
+    const doc = new Doc(1, 1, { bg: '#f00' });
+    const group = doc.groupFromActive();
+    const base = doc.activeLayer;
+    doc.addAdjustmentLayer('invert');
+    const pixel = () => Array.from(doc.compose().getContext('2d').getImageData(0, 0, 1, 1).data);
+    const before = pixel();
+    base.opacity = 0.5;
+    doc.changed();
+    const after = pixel();
+    const merged = doc.rasterizeGroup(group.id);
+    return { before, after, merged: merged.type, baked: pixel() };
+  });
+  expect(result.before).toEqual([0, 255, 255, 255]);
+  expect(result.after[3]).toBeLessThan(255);
+  expect(result.after).not.toEqual(result.before);
+  expect(result.merged).toBe('raster');
+  expect(result.baked).toEqual(result.after);
+});

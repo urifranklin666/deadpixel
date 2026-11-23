@@ -55,10 +55,12 @@ class App {
     let processingJobs = 0;
     doc.onProcessingChange = (active) => {
       processingJobs = Math.max(0, processingJobs + (active ? 1 : -1));
+      if (this.doc !== doc) return;
       const indicator = $('#st-processing');
       indicator.hidden = processingJobs === 0;
       indicator.classList.toggle('on', processingJobs > 0);
     };
+    doc.onProcessingChange(false);
     if (this.pendingRecipe) {
       doc.effects = this.pendingRecipe.effects;
       doc.signalSeed = this.pendingRecipe.seed;
@@ -211,7 +213,12 @@ class App {
     ctx.imageSmoothingQuality = 'high';
     ctx.translate(panX, panY);
     ctx.scale(zoom, zoom);
-    ctx.drawImage(D.composePreview(() => this.requestRender()), 0, 0);
+    ctx.drawImage(D.composePreview(() => {
+      if (this.doc !== D) return;
+      this._navThumbDirty = true;
+      this._histogramDirty = true;
+      this.requestRender();
+    }), 0, 0);
     if (this.maskPaint?.canvas) {
       ctx.save(); ctx.globalAlpha = .42; ctx.globalCompositeOperation = 'screen'; ctx.drawImage(this.maskPaint.canvas, 0, 0); ctx.restore();
     }
@@ -933,9 +940,13 @@ async function boot() {
   document.querySelectorAll('#damage-dock [data-damage]').forEach(button => {
     const action = button.dataset.damage;
     if (action === 'compare') {
+      let bypassed = null;
       const bypass = (on) => {
-        if (!app.doc) return;
-        app.doc._effectsBypassed = on; app.doc._compoDirty = true; app.requestRender();
+        if (on) bypassed = app.doc;
+        if (!bypassed) return;
+        bypassed.setEffectBypass(bypassed, on);
+        if (!on) bypassed = null;
+        app.requestRender();
         button.classList.toggle('holding', on); button.querySelector('span').textContent = on ? 'ORIGINAL' : 'BEFORE';
       };
       button.addEventListener('pointerdown', e => { e.preventDefault(); try { button.setPointerCapture(e.pointerId); } catch (_) {} bypass(true); });

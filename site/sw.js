@@ -1,8 +1,8 @@
 /* DEADPIXEL service worker — offline-first, versioned cache. */
-const VERSION = 'dp-v2.0.0';
+const VERSION = 'dp-v2.0.0-1';
 const CORE = [
   './', 'index.html', 'css/ui.css',
-  'js/main.js', 'js/engine.js', 'js/brushes.js', 'js/tools.js', 'js/pixelops.js',
+  'js/main.js', 'js/engine.js', 'js/canvas.js', 'js/compositor.js', 'js/brushes.js', 'js/tools.js', 'js/pixelops.js',
   'js/filters.js', 'js/io.js', 'js/ui.js', 'js/processing-worker.js', 'js/io-worker.js', 'js/encode-worker.js', 'js/vendor/fflate.js',
   'fonts/big-shoulders-var.woff2', 'fonts/vt323.woff2',
   'fonts/pack/fonts.css', 'fonts/pack/fonts.json',

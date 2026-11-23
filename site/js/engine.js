@@ -3,24 +3,17 @@
    Leaves can carry a nondestructive layer mask and a clipping flag. */
 
 import { blurAlpha, growAlpha } from './pixelops.js';
+import { makeCanvas, copyCanvas } from './canvas.js';
+import { Compositor, adjustDefaults } from './compositor.js';
+
+export { makeCanvas, copyCanvas } from './canvas.js';
+export { setAdjustFilters } from './compositor.js';
 
 let _uid = 1;
 export const uid = () => 'L' + (_uid++) + '_' + Date.now().toString(36);
 export const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 
 export const MAX_TREE_DEPTH = 8;
-
-export function makeCanvas(w, h) {
-  const c = document.createElement('canvas');
-  c.width = Math.max(1, Math.round(w));
-  c.height = Math.max(1, Math.round(h));
-  return c;
-}
-export function copyCanvas(src) {
-  const c = makeCanvas(src.width, src.height);
-  c.getContext('2d').drawImage(src, 0, 0);
-  return c;
-}
 
 export const BLEND_MODES = [
   ['pass-through', 'Pass Through'], ['source-over', 'Normal'], ['multiply', 'Multiply'], ['screen', 'Screen'],
@@ -219,17 +212,6 @@ function textBounds(layer) {
 }
 
 /* ------------------------------------------------------------- tree utils */
-
-/* adjustment kernels are injected once from filters.js (which imports this
-   module, so the reference must point back) */
-let ADJUST_FILTERS = [];
-export function setAdjustFilters(list) { ADJUST_FILTERS = list || []; }
-function adjustDefaults(filterId) {
-  const f = ADJUST_FILTERS.find(x => x.id === filterId);
-  const p = {};
-  (f?.params || []).forEach(pr => p[pr.key] = pr.def);
-  return p;
-}
 
 /* adjustment layer: a full-canvas color op applied to everything below it
    inside its own sibling list. Carries a filter id + params; the visible
@@ -482,12 +464,7 @@ export class Doc extends EventTarget {
     this.effectProcessorAsync = null;
     this.history = new History();
     this.dirty = false;         // unsaved changes
-    this._compo = makeCanvas(w, h);
-    this._compoCtx = this._compo.getContext('2d', { willReadFrequently: true });
-    this._compoDirty = true;
-    this._compoEffectsApplied = false;
-    this._compoGeneration = 0;
-    this._compoPending = null;
+    this._compositor = new Compositor(this);
     this.onProcessingChange = null;
 
     const base = new Layer(w, h, 'Background');
@@ -547,261 +524,17 @@ export class Doc extends EventTarget {
 
   changed(structural = false) {
     this.dirty = true;
-    this._compoDirty = true;
-    this._compoEffectsApplied = false;
-    this._compoGeneration++;
+    this._compositor.invalidate();
     this.dispatchEvent(new CustomEvent('change', { detail: { structural } }));
   }
 
-  /* --------------------------- compositing core --------------------------- */
-  /* signature of a subtree — anything that changes its rendered output */
-  _nodeSig(l) {
-    if (l.type === 'adjust') {
-      return `A[${l.id}:${l.filter}:${JSON.stringify(l.params || {})}:${l.visible ? 1 : 0}:${l.opacity}:${l.blend}:${l.clipped ? 1 : 0}:${this._maskSig(l)}]`;
-    }
-    if (l.type === 'group') {
-      return 'G{'
-        + `${l.id}:${l.visible?1:0}:${l.opacity}:${l.blend}:${l.clipped?1:0}`
-        + `:fx${l._effectsBypassed ? 'B' : (l.effects?.length ? 'Y' + this._fxSeedPart(l) : '')}`
-        + `:${this._maskSig(l)}:` + this._childrenSig(l) + '}';
-    }
-    return `${l.id}:${l.revision}:${l.visible?1:0}:${l.opacity}:${l.blend}:${l.clipped?1:0}`
-      + `:fx${l._effectsBypassed ? 'B' : (l.effects?.length ? l._effectCacheKey || '?' : '')}`
-      + `:${this._maskSig(l)}`;
-  }
-  _childrenSig(l) {
-    return l.children.map(c => this._nodeSig(c)).join('|');
-  }
-  _maskSig(l) {
-    return l.mask ? (l.maskEnabled ? 'M' + l.maskRevision : 'Moff' + l.maskRevision) : '-';
-  }
-  _fxSeedPart(l) { return (l.signalSeed >>> 0).toString(36) + ':' + (this.maskRevision >>> 0).toString(36); }
+  get _compoCtx() { return this._compositor.context; }
+  get _compoEffectsApplied() { return this._compositor.complete; }
+  get _compoPending() { return this._compositor.pending; }
 
-  /* children composited into a cached, doc-sized buffer.
-     (The group's own layer mask is applied later, in _layerContent,
-      so it clips the final output after the group's Signal Rack.) */
-  _groupBuffer(g, preview = false, onReady = null) {
-    const sig = this._childrenSig(g);
-    if (g._groupCache && g._groupCache.key === sig) return g._groupCache.canvas;
-    const canvas = makeCanvas(this.width, this.height);
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    this._renderLayers(g.children, ctx, preview, onReady);
-    g._groupCache = { canvas, key: sig };
-    return canvas;
-  }
-
-  /* one node's drawable content: leaf canvas or group buffer, with its
-     Signal Rack stack applied, then its layer mask applied. May start an
-     async preview job and return the stale canvas meanwhile. */
-  _layerContent(l, preview = false, onReady = null) {
-    let base = l.type === 'group' ? this._groupBuffer(l, preview, onReady) : l.canvas;
-    if (l.effects?.length && this.effectProcessor && !l._effectsBypassed) {
-      const key = l.type === 'group' ? 'G|' + this._childrenSig(l) : l.revision + ':' + this.maskRevision;
-      const fullKey = key + ':' + l.signalSeed + ':' + JSON.stringify(l.effects);
-      if (l._signalStageCache?.inputRevision !== key) l._signalStageCache = { inputRevision: key };
-      if (l._effectCacheKey !== fullKey) {
-        if (preview && this.effectProcessorAsync) {
-          if (l._effectPendingKey !== fullKey) {
-            if (l._effectPending) this.onProcessingChange?.(false);
-            const token = {}; l._effectPending = token; l._effectPendingKey = fullKey;
-            this.onProcessingChange?.(true);
-            const input = copyCanvas(base);
-            this.effectProcessorAsync(input, l.effects, l.signalSeed, l._signalStageCache ||= {}).then((pixels) => {
-              if (l._effectPending !== token) return;
-              l._effectPending = null; l._effectPendingKey = null; this.onProcessingChange?.(false);
-              const stale = l.type === 'group' ? 'G|' + this._childrenSig(l) : l.revision + ':' + this.maskRevision;
-              if (stale + ':' + l.signalSeed + ':' + JSON.stringify(l.effects) !== fullKey) return;
-              const output = makeCanvas(this.width, this.height), image = output.getContext('2d').createImageData(this.width, this.height);
-              image.data.set(pixels); output.getContext('2d').putImageData(image, 0, 0);
-              l._effectCache = output; l._effectCacheKey = fullKey;
-              this._compoDirty = true; onReady?.();
-            }).catch(() => {
-              if (l._effectPending !== token) return;
-              l._effectPending = null; l._effectPendingKey = null; this.onProcessingChange?.(false);
-            });
-          }
-        } else {
-          if (l._effectPending) this.onProcessingChange?.(false);
-          l._effectPending = null; l._effectPendingKey = null;
-          l._effectCache = copyCanvas(base);
-          this.effectProcessor(l._effectCache, l.effects, l.signalSeed, l._signalStageCache ||= {});
-          l._effectCacheKey = fullKey;
-        }
-      }
-      if (l._effectCacheKey === fullKey) base = l._effectCache;
-    }
-    if (l.mask && l.maskEnabled) {
-      const outKey = this._maskSig(l) + '|' + (l._effectCacheKey || 'raw' + l.revision);
-      if (l._maskedCache?.key !== outKey) {
-        const masked = copyCanvas(base);
-        masked.getContext('2d').globalCompositeOperation = 'destination-in';
-        masked.getContext('2d').drawImage(l.mask, 0, 0);
-        l._maskedCache = { canvas: masked, key: outKey };
-      }
-      base = l._maskedCache.canvas;
-      l._contentKey = outKey;
-    } else {
-      l._contentKey = (l._effectCacheKey || 'raw' + l.revision + ':' + (l.type === 'group' ? this._childrenSig(l) : ''));
-    }
-    return base;
-  }
-
-  /* alpha-only copy used as the clip source for clipping masks; cached per node */
-  _clipSource(l, content) {
-    if (l._clipCache && l._clipCache.key === l._contentKey) return l._clipCache.canvas;
-    const c = makeCanvas(this.width, this.height);
-    c.getContext('2d').drawImage(content, 0, 0);
-    l._clipCache = { canvas: c, key: l._contentKey };
-    return c;
-  }
-
-  /* adjustment output: the filter applied to the backdrop accumulated so
-     far, then masked by the adjustment's layer mask. Cached on
-     `backdropKey | filter | params | visibility | maskSig`. */
-  _adjustContent(l, below, belowKey) {
-    const key = belowKey + '|' + (l.filter || 'none') + '|' + JSON.stringify(l.params || {})
-      + '|' + (l.visible ? 1 : 0) + ':' + this._maskSig(l);
-    if (l._adjustCache?.key === key) { l._contentKey = 'ad' + key; return l._adjustCache.canvas; }
-    if (!l.visible) { l._contentKey = 'ad' + key; return null; }
-    const f = ADJUST_FILTERS.find(x => x.id === l.filter);
-    if (!f) { l._contentKey = 'ad' + key; l._adjustCache = { canvas: below, key, passthrough: true }; return below; }
-    const out = copyCanvas(below);
-    const octx = out.getContext('2d', { willReadFrequently: true });
-    const img = octx.getImageData(0, 0, this.width, this.height);
-    f.apply(img, this.width, this.height, { ...adjustDefaults(l.filter), ...(l.params || {}) });
-    octx.putImageData(img, 0, 0);
-    if (l.mask && l.maskEnabled) {
-      octx.globalCompositeOperation = 'destination-in';
-      octx.drawImage(l.mask, 0, 0);
-      octx.globalCompositeOperation = 'source-over';
-    }
-    l._adjustCache = { canvas: out, key };
-    l._contentKey = 'ad' + key;
-    return out;
-  }
-
-  /* blend a content canvas onto the workspace ctx honoring the node's
-     blend mode (pass-through coerced for non-groups) and opacity */
-  _blendOnto(ctx, content, blend, opacity) {
-    const gco = blend === 'pass-through' ? 'source-over' : blend;
-    ctx.globalAlpha = opacity;
-    ctx.globalCompositeOperation = gco;
-    ctx.drawImage(content, 0, 0);
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  /* draw a sibling list (root or inside a group) honoring clip chains */
-  _renderLayers(list, ctx, preview = false, onReady = null) {
-    let clipBase = null;
-    let accKey = ''; // identity of the backdrop: every drawn node's content key
-    for (let i = 0; i < list.length; i++) {
-      const l = list[i];
-      if (!l.visible || l.opacity <= 0) continue;
-      /* pass-through groups paint their children straight onto the backdrop
-         (no buffer, no group blend); falls back to the buffer path when the
-         group has masking/fx/opacity/clip interactions */
-      if (l.type === 'group' && l.blend === 'pass-through'
-        && l.opacity >= 1 && !l.mask && !l.effects?.length && !l._effectsBypassed) {
-        const laterClipped = list.slice(i + 1).some(s => s.clipped && s.visible && s.opacity > 0);
-        if (!laterClipped && !l.clipped) {
-          this._renderLayers(l.children, ctx, preview, onReady);
-          accKey += '|pt' + this._nodeSig(l);
-          continue;
-        }
-      }
-      const content = l.type === 'adjust'
-        ? this._adjustContent(l, ctx.canvas, accKey)
-        : this._layerContent(l, preview, onReady);
-      if (content) {
-        if (l.clipped && clipBase) {
-          if (l.blend !== 'source-over' || l.opacity < 1) {
-            // blend against the backdrop below, then keep only the base's alpha
-            const R = makeCanvas(this.width, this.height);
-            const rctx = R.getContext('2d');
-            rctx.drawImage(ctx.canvas, 0, 0);
-            rctx.globalAlpha = l.opacity;
-            rctx.globalCompositeOperation = l.blend === 'pass-through' ? 'source-over' : l.blend;
-            rctx.drawImage(content, 0, 0);
-            rctx.globalAlpha = 1;
-            rctx.globalCompositeOperation = 'destination-in';
-            rctx.drawImage(clipBase, 0, 0);
-            ctx.drawImage(R, 0, 0);
-          } else {
-            const scratch = copyCanvas(content);
-            scratch.getContext('2d').globalCompositeOperation = 'destination-in';
-            scratch.getContext('2d').drawImage(clipBase, 0, 0);
-            ctx.drawImage(scratch, 0, 0);
-          }
-        } else {
-          this._blendOnto(ctx, content, l.blend, l.opacity);
-        }
-        // a clip source is only needed when a later sibling is actually clipped
-        const laterClipped = list.slice(i + 1).some(s => s.clipped && s.visible && s.opacity > 0);
-        if (laterClipped && !l.clipped) clipBase = this._clipSource(l, content);
-        else if (l.clipped) clipBase = clipBase;
-        accKey += '|' + (l._contentKey || l.id);
-      }
-    }
-  }
-
-  _buildCompositeBase(preview = false, onReady = null) {
-    if (this._compoDirty) {
-      // Also invalidates jobs when callers toggle preview-only state directly.
-      this._compoGeneration++;
-      if (this._compoPending) this.onProcessingChange?.(false);
-      this._compoPending = null;
-      const ctx = this._compoCtx;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, this.width, this.height);
-      this._renderLayers(this.layers, ctx, preview, onReady);
-      const baseKey = 'T' + this._childrenSig({ children: this.layers });
-      if (this._signalStageCache?.baseKey !== baseKey) this._signalStageCache = { baseKey };
-      this._compoDirty = false;
-      this._compoEffectsApplied = this._effectsBypassed || !this.effects.length;
-    }
-  }
-
-  compose() {
-    this._buildCompositeBase();
-    if (!this._compoEffectsApplied && this.effectProcessor) {
-      this._compoGeneration++;
-      this._compoPending = null;
-      this.effectProcessor(this._compo, this.effects, this.signalSeed, this._signalStageCache ||= {});
-      this._compoEffectsApplied = true;
-    }
-    return this._compo;
-  }
-
-  composePreview(onReady) {
-    this._buildCompositeBase(true, onReady);
-    if (this._compoEffectsApplied || this._compoPending) return this._compo;
-    if (!this.effectProcessorAsync) return this.compose();
-    const token = { generation: this._compoGeneration };
-    this._compoPending = token;
-    this.onProcessingChange?.(true);
-    this.effectProcessorAsync(this._compo, this.effects, this.signalSeed, this._signalStageCache ||= {}).then((pixels) => {
-      if (this._compoPending !== token) return;
-      this._compoPending = null;
-      this.onProcessingChange?.(false);
-      if (this._compoDirty || token.generation !== this._compoGeneration) return;
-      const image = this._compoCtx.createImageData(this.width, this.height);
-      image.data.set(pixels);
-      this._compoCtx.putImageData(image, 0, 0);
-      this._compoEffectsApplied = true;
-      onReady?.();
-    }).catch(() => {
-      if (this._compoPending !== token) return;
-      this._compoPending = null;
-      this.onProcessingChange?.(false);
-      if (!this._compoDirty && token.generation === this._compoGeneration) {
-        this.effectProcessor?.(this._compo, this.effects, this.signalSeed);
-        this._compoEffectsApplied = true;
-        onReady?.();
-      }
-    });
-    return this._compo;
-  }
+  setEffectBypass(owner, bypass) { this._compositor.setBypass(owner, bypass); }
+  compose() { return this._compositor.compose(); }
+  composePreview(onReady) { return this._compositor.compose(true, onReady); }
 
   /* flattened copy on white/transparent for export */
   flattenedCanvas(background = null) {
@@ -827,7 +560,7 @@ export class Doc extends EventTarget {
     const before = clone(layer.effects || []), after = clone(next);
     const beforeSeed = layer.signalSeed >>> 0, afterSeed = nextSeed >>> 0;
     const apply = (value, seed) => {
-      layer.effects = clone(value); layer.signalSeed = seed; layer._effectCacheKey = null; this.changed();
+      layer.effects = clone(value); layer.signalSeed = seed; this.changed();
     };
     this.history.push(label, () => apply(before, beforeSeed), () => apply(after, afterSeed));
     apply(after, afterSeed);
@@ -892,10 +625,9 @@ export class Doc extends EventTarget {
     const before = { ...l.params };
     const after = { ...params };
     this.history.push(label,
-      () => { l.params = { ...before }; l._adjustCache = null; this.changed(); },
-      () => { l.params = { ...after }; l._adjustCache = null; this.changed(); });
+      () => { l.params = { ...before }; this.changed(); },
+      () => { l.params = { ...after }; this.changed(); });
     l.params = { ...after };
-    l._adjustCache = null;
     this.changed();
   }
 
@@ -989,44 +721,10 @@ export class Doc extends EventTarget {
     const at = this.locate(id ?? this._activeId);
     if (!at || at.index <= 0) return false;
     const top = at.list[at.index], bottom = at.list[at.index - 1];
-    if (bottom.type === 'adjust') return false; // bake only onto pixel content
-    if (top.type === 'adjust') {
-      // bake the adjustment into the pair, removing both nodes
-      if (top.clipped) return false;
-      const merged = new Layer(this.width, this.height, bottom.name);
-      merged.clipped = bottom.clipped;
-      merged.ctx.globalAlpha = bottom.opacity;
-      merged.ctx.globalCompositeOperation = bottom.blend === 'pass-through' ? 'source-over' : bottom.blend;
-      if (bottom.visible) merged.ctx.drawImage(this._layerContent(bottom), 0, 0);
-      merged.ctx.globalAlpha = 1;
-      merged.ctx.globalCompositeOperation = 'source-over';
-      if (top.visible) {
-        const adjusted = this._adjustContent(top, merged, 'bake|' + (bottom._contentKey || bottom.id));
-        merged.ctx.globalAlpha = top.opacity;
-        merged.ctx.globalCompositeOperation = top.blend === 'pass-through' ? 'source-over' : top.blend;
-        merged.ctx.drawImage(adjusted, 0, 0);
-        merged.ctx.globalAlpha = 1;
-        merged.ctx.globalCompositeOperation = 'source-over';
-      }
-      this._structural('Merge down', () => {
-        at.list.splice(at.index - 1, 2, merged);
-        this._activeId = merged.id;
-      });
-      return true;
-    }
-    const bottomContent = this._layerContent(bottom);
+    if (bottom.type === 'adjust' || (top.type === 'adjust' && top.clipped)) return false;
     const merged = new Layer(this.width, this.height, bottom.name);
-    merged.visible = true;
-    merged.opacity = bottom.opacity !== 1 || bottom.blend !== 'source-over' ? 1 : bottom.opacity;
     merged.clipped = bottom.clipped;
-    merged.ctx.globalAlpha = bottom.opacity;
-    merged.ctx.globalCompositeOperation = bottom.blend === 'pass-through' ? 'source-over' : bottom.blend;
-    if (bottom.visible) merged.ctx.drawImage(bottomContent, 0, 0);
-    merged.ctx.globalAlpha = top.opacity;
-    merged.ctx.globalCompositeOperation = top.blend === 'pass-through' ? 'source-over' : top.blend;
-    if (top.visible) merged.ctx.drawImage(this._layerContent(top), 0, 0);
-    merged.ctx.globalAlpha = 1;
-    merged.ctx.globalCompositeOperation = 'source-over';
+    if (!this._compositor.mergePair(at.list, at.index, merged)) return false;
     this._structural('Merge down', () => {
       at.list.splice(at.index - 1, 2, merged);
       this._activeId = merged.id;
@@ -1034,30 +732,21 @@ export class Doc extends EventTarget {
     return true;
   }
 
-  /* rasterize a group into one layer (PS "Merge Group") */
-  rasterizeGroup(id = null, label = 'Merge group', bakeGroupProps = true) {
+  rasterizeGroup(id = null, label = 'Merge group', keepGroupProps = true) {
     const at = this.locate(id ?? this._activeId);
-    if (!at) return;
-    const g = at.list[at.index];
-    if (g.type !== 'group') return;
-    const buffer = copyCanvas(this._groupBuffer(g));
-    if (g.effects?.length && this.effectProcessor && !g._effectsBypassed) {
-      this.effectProcessor(buffer, this.effectsWithMasks(g.effects), g.signalSeed, {});
+    const group = at?.list[at.index];
+    if (group?.type !== 'group') return;
+    const merged = new Layer(this.width, this.height, group.name);
+    if (keepGroupProps) {
+      merged.visible = group.visible;
+      merged.opacity = group.opacity;
+      merged.blend = group.blend === 'pass-through' ? 'source-over' : group.blend;
+      merged.clipped = group.clipped;
+      merged.mask = group.mask ? copyCanvas(group.mask) : null;
+      merged.maskEnabled = group.maskEnabled;
+      merged.signalSeed = group.signalSeed >>> 0;
     }
-    if (g.mask && g.maskEnabled) {
-      buffer.getContext('2d').globalCompositeOperation = 'destination-in';
-      buffer.getContext('2d').drawImage(g.mask, 0, 0);
-      buffer.getContext('2d').globalCompositeOperation = 'source-over';
-    }
-    const merged = new Layer(this.width, this.height, g.name);
-    if (bakeGroupProps) {
-      merged.visible = g.visible; merged.opacity = g.opacity;
-      merged.blend = g.blend; merged.clipped = g.clipped;
-      merged.mask = g.mask ? copyCanvas(g.mask) : null;
-      merged.maskEnabled = g.maskEnabled;
-      merged.signalSeed = g.signalSeed >>> 0;
-    }
-    merged.ctx.drawImage(buffer, 0, 0);
+    if (!this._compositor.bakeGroup(at.list, at.index, merged, keepGroupProps)) return false;
     this._structural(label, () => {
       at.list.splice(at.index, 1, merged);
       this._activeId = merged.id;
@@ -1068,10 +757,19 @@ export class Doc extends EventTarget {
   flatten() {
     const flat = new Layer(this.width, this.height, 'Background');
     flat.ctx.drawImage(this.compose(), 0, 0);
-    this._structural('Flatten', () => {
+    const before = this._snapshotTree();
+    const effects = this.effects;
+    const apply = () => {
       this.layers = [flat];
       this._activeId = flat.id;
-    });
+      this.effects = [];
+      this.changed(true);
+    };
+    this.history.push('Flatten', () => {
+      this.effects = effects;
+      this._restoreTree(before);
+    }, apply);
+    apply();
   }
 
   rasterizeLayer(id = null) {
@@ -1303,8 +1001,6 @@ export class Doc extends EventTarget {
   }
   _geoRestore(s) {
     this.width = s.w; this.height = s.h;
-    this._compo = makeCanvas(s.w, s.h);
-    this._compoCtx = this._compo.getContext('2d', { willReadFrequently: true });
     this.layers = cloneLevel(s.root);
     this.signalMasks = new Map([...s.masks].map(([id, data]) => [id, new Uint8ClampedArray(data)]));
     this.activeIndex = s.idx;

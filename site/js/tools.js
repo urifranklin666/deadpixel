@@ -1435,7 +1435,11 @@ export const transformTool = {
     let layer = D.activeLayer;
     if (!layer) return false;
     if (layer.locked) { app.toast('LAYER IS LOCKED', true); return false; }
-    if (layer.type === 'group') { D.rasterizeGroup(null, 'Rasterize group'); layer = D.activeLayer; app.toast('GROUP RASTERIZED FOR TRANSFORM'); }
+    if (layer.type === 'group') {
+      layer = D.rasterizeGroup(null, 'Rasterize group');
+      if (!layer) { app.toast('PASS THROUGH NEEDS LAYERS OUTSIDE THIS GROUP', true); return false; }
+      app.toast('GROUP RASTERIZED FOR TRANSFORM');
+    }
     if (layer.type === 'text') { D.rasterizeLayer(); layer = D.activeLayer; app.toast('TEXT RASTERIZED FOR TRANSFORM'); }
     if (layer.type === 'adjust') { app.toast('ADJUSTMENT LAYER — MOVE IT OR EDIT ITS MASK INSTEAD', true); return false; }
     // find content bounds

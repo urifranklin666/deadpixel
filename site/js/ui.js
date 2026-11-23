@@ -296,7 +296,6 @@ async function adjustmentLayerDialog(app, layer) {
     const gen = ++generation;
     previewTimer = setTimeout(() => {
       if (gen !== generation) return;
-      layer._adjustCache = null;
       D.changed();
       app.requestRender();
     }, 60);
@@ -325,7 +324,7 @@ async function adjustmentLayerDialog(app, layer) {
   ]);
   clearTimeout(previewTimer);
   if (ok) D.setAdjustParams(layer.id, { ...layer.params }, f.name);
-  else { layer.params = { ...before }; layer._adjustCache = null; D.changed(); }
+  else { layer.params = { ...before }; D.changed(); }
   app.refreshLayers?.();
   app.requestRender();
 }
@@ -537,12 +536,12 @@ export function buildCommands(app) {
     'layer.group': { label: 'Group Layers', key: 'Ctrl+G', run: needDoc(() => D().groupFromActive()) },
     'layer.clip': { label: 'Create Clipping Mask', key: 'Ctrl+Alt+G', run: needDoc(() => D().setClipped()) },
     'layer.merge': { label: 'Merge Down', key: 'Ctrl+E', run: needDoc(() => {
-      if (D().mergeDown() === false) app.toast('ADJUSTMENT LAYERS MERGE ONTO PIXEL LAYERS ONLY', true);
+      if (!D().mergeDown()) app.toast('MERGE DOWN NEEDS TWO LAYERS THAT CAN BE COMBINED WITHOUT CHANGING THE IMAGE', true);
     }) },
     'layer.rasterizegroup': { label: 'Merge Group Contents', key: null, run: needDoc(() => {
       const l = D().activeLayer;
-      if (l?.type === 'group') D().rasterizeGroup(null, 'Merge group');
-      else app.toast('SELECT A GROUP TO MERGE ITS CONTENTS', true);
+      if (l?.type !== 'group') app.toast('SELECT A GROUP TO MERGE ITS CONTENTS', true);
+      else if (!D().rasterizeGroup()) app.toast('PASS THROUGH NEEDS LAYERS OUTSIDE THIS GROUP', true);
     })},
     'layer.flatten': { label: 'Flatten Image', key: null, run: needDoc(() => D().flatten()) },
     'layer.rasterize': { label: 'Rasterize Text', key: null, run: needDoc(() => D().rasterizeLayer()) },
@@ -1041,9 +1040,8 @@ function buildLayersPanel(app, host) {
   const maskBtn = mkBtn('◐', 'layer mask menu', () => showMaskMenu(maskBtn));
   mkBtn('⧉', 'duplicate', () => app.doc?.duplicateLayer());
   mkBtn('⇓', 'merge down / merge group contents', () => {
-    const l = app.doc?.activeLayer;
-    if (app.doc && l?.type === 'group') app.doc.rasterizeGroup(null, 'Merge group');
-    else app.doc?.mergeDown();
+    const command = app.doc?.activeLayer?.type === 'group' ? 'layer.rasterizegroup' : 'layer.merge';
+    app.cmd[command].run();
   });
   mkBtn('↳', 'toggle clipping mask', () => app.doc?.setClipped());
   const delBtn = mkBtn('🗑', 'delete layer', () => app.doc?.removeLayer());
@@ -1449,8 +1447,22 @@ function buildActionsPanel(app, host) {
     compareABtn.textContent = 'SHOW ' + (slot === 'a' ? 'B' : 'A');
     refreshActive(); app.requestRender();
   });
-  bypassBtn.addEventListener('pointerdown', () => { const T = target(); if (T && app.doc) { T._effectsBypassed = true; app.doc._compoDirty = true; app.requestRender(); bypassBtn.classList.add('on'); } });
-  const restoreBypass = () => { const T = target(); if (T && app.doc) { T._effectsBypassed = false; app.doc._compoDirty = true; app.requestRender(); bypassBtn.classList.remove('on'); } };
+  let bypassed = null;
+  bypassBtn.addEventListener('pointerdown', () => {
+    const doc = app.doc, owner = target();
+    if (!doc || !owner || bypassed) return;
+    bypassed = { doc, owner };
+    doc.setEffectBypass(owner, true);
+    app.requestRender();
+    bypassBtn.classList.add('on');
+  });
+  const restoreBypass = () => {
+    if (!bypassed) return;
+    bypassed.doc.setEffectBypass(bypassed.owner, false);
+    bypassed = null;
+    app.requestRender();
+    bypassBtn.classList.remove('on');
+  };
   ['pointerup','pointercancel','pointerleave'].forEach(ev => bypassBtn.addEventListener(ev, restoreBypass));
   saveBtn.addEventListener('click', async () => {
     const D = app.doc, T = target(); if (!T?.effects.length) return;
