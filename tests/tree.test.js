@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GroupLayer, AdjustLayer, setAdjustFilters, flattenLayers, countLeaves, MAX_TREE_DEPTH, uid } from '../site/js/engine.js';
+import { Doc, GroupLayer, AdjustLayer, setAdjustFilters, flattenLayers, countLeaves, MAX_TREE_DEPTH, uid } from '../site/js/engine.js';
+import { docFromFiles, serializeDoc } from '../site/js/io.js';
 
-/* Canvas-free tree tests: everything here runs in plain node.
-   Doc-level structural operations (groups, reparenting, clipping) are
-   covered by the Playwright suite through window.deadpixel. */
+/* Tree tests run in Node. The document-level cases stub canvas creation
+   because they only use groups and never draw pixels. */
 
 const leaf = (name) => ({
   id: name, type: 'raster', name,
@@ -154,4 +154,87 @@ test('groups nest adjustment layers and pass structural identity through', () =>
   assert.deepEqual(flat.map(l => l.name), ['G', 'a1', 'SAT']);
   assert.equal(countLeaves([g]), 2);
   assert.equal(g.contains(a.id), true);
+});
+
+function groupOnlyDoc(t) {
+  globalThis.document = { createElement: () => ({ getContext: () => ({}) }) };
+  t.after(() => { delete globalThis.document; });
+  const doc = new Doc(1, 1);
+  doc.layers = [];
+  return doc;
+}
+
+test('layer moves preserve the maximum nesting the DPX reader can reopen', async t => {
+  const doc = groupOnlyDoc(t);
+  let parent = doc.addGroup('Root');
+  for (let depth = 1; depth < MAX_TREE_DEPTH; depth++) {
+    doc.setActiveId(doc.layers[0].id);
+    const child = doc.addGroup('Nested ' + depth);
+    assert.equal(doc.reparent(child.id, parent.id), true);
+    parent = child;
+  }
+  doc.setActiveId(doc.layers[0].id);
+  const extra = doc.addGroup('Extra');
+  const position = doc.history.index;
+  parent.expanded = false;
+  assert.equal(doc.reparent(extra.id, parent.id), false);
+  assert.equal(doc.moveLayerRelative(extra.id, parent.id, 'into'), 'depth');
+  assert.equal(parent.expanded, false);
+  doc.setActiveId(parent.id);
+  assert.equal(doc.groupFromActive(), null);
+  assert.equal(doc.history.index, position);
+  assert.equal(doc.layers.includes(extra), true);
+  const restored = await docFromFiles(await serializeDoc(doc));
+  assert.equal(restored.flatLayers.length, MAX_TREE_DEPTH + 1);
+});
+
+test('undo and redo preserve the group targeted by earlier clipping history', t => {
+  const doc = groupOnlyDoc(t);
+  const group = doc.addGroup('Clipped');
+  doc.setClipped(group.id, true);
+  const sibling = doc.addGroup('Sibling');
+  doc.history.undo();
+  doc.history.undo();
+  assert.equal(doc.findLayer(group.id).clipped, false);
+  doc.history.redo();
+  doc.history.redo();
+  assert.equal(doc.findLayer(group.id).clipped, true);
+  assert.equal(doc.findLayer(sibling.id).name, 'Sibling');
+});
+
+test('a DPX round trip restores the selected nested group', async t => {
+  const doc = groupOnlyDoc(t);
+  const parent = doc.addGroup('Parent');
+  const selected = doc.addGroup('Selected');
+  doc.reparent(selected.id, parent.id);
+  doc.setActiveId(parent.id);
+  doc.addGroup('Later');
+  doc.setActiveId(selected.id);
+  const restored = await docFromFiles(await serializeDoc(doc));
+  assert.equal(restored.activeLayer.name, 'Selected');
+});
+
+test('undo and redo restore nested child lists while keeping node identity', t => {
+  const doc = groupOnlyDoc(t);
+  const parent = doc.addGroup('Parent');
+  const left = doc.addGroup('Left');
+  const right = doc.addGroup('Right');
+  assert.equal(doc.reparent(left.id, parent.id), true);
+  assert.equal(doc.reparent(right.id, parent.id, 1), true);
+
+  assert.equal(doc.moveLayerRelative(left.id, right.id, 'above'), 'moved');
+  assert.deepEqual(parent.children, [right, left]);
+  doc.history.undo();
+  assert.deepEqual(parent.children, [left, right]);
+  assert.equal(doc.activeLayer, right);
+  doc.history.redo();
+  assert.deepEqual(parent.children, [right, left]);
+  assert.equal(doc.activeLayer, left);
+
+  assert.equal(doc.moveLayerRelative(left.id, right.id, 'into'), 'moved');
+  assert.equal(right.children[0], left);
+  assert.equal(doc.moveLayerRelative(right.id, left.id, 'into'), 'cycle');
+  doc.history.undo();
+  assert.deepEqual(parent.children, [right, left]);
+  assert.deepEqual(right.children, []);
 });

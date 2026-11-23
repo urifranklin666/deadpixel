@@ -533,7 +533,9 @@ export function buildCommands(app) {
     'layer.delete': { label: 'Delete Layer', key: null, run: needDoc(() => D().removeLayer()) },
     'layer.up': { label: 'Move Layer Up', key: null, run: needDoc(() => D().moveWithinSiblings(D()._activeId, 1)) },
     'layer.down': { label: 'Move Layer Down', key: null, run: needDoc(() => D().moveWithinSiblings(D()._activeId, -1)) },
-    'layer.group': { label: 'Group Layers', key: 'Ctrl+G', run: needDoc(() => D().groupFromActive()) },
+    'layer.group': { label: 'Group Layers', key: 'Ctrl+G', run: needDoc(() => {
+      if (!D().groupFromActive()) app.toast('LAYER GROUP NESTING LIMIT REACHED', true);
+    }) },
     'layer.clip': { label: 'Create Clipping Mask', key: 'Ctrl+Alt+G', run: needDoc(() => D().setClipped()) },
     'layer.merge': { label: 'Merge Down', key: 'Ctrl+E', run: needDoc(() => {
       if (!D().mergeDown()) app.toast('MERGE DOWN NEEDS TWO LAYERS THAT CAN BE COMBINED WITHOUT CHANGING THE IMAGE', true);
@@ -1036,7 +1038,9 @@ function buildLayersPanel(app, host) {
     return b;
   };
   mkBtn('+', 'new layer', () => app.doc?.addLayer());
-  mkBtn('▦', 'new group', () => app.doc?.addGroup());
+  mkBtn('▦', 'new group', () => {
+    if (app.doc && !app.doc.addGroup()) app.toast('LAYER GROUP NESTING LIMIT REACHED', true);
+  });
   const maskBtn = mkBtn('◐', 'layer mask menu', () => showMaskMenu(maskBtn));
   mkBtn('⧉', 'duplicate', () => app.doc?.duplicateLayer());
   mkBtn('⇓', 'merge down / merge group contents', () => {
@@ -1118,29 +1122,9 @@ function buildLayersPanel(app, host) {
 
   /* reparent on drop: above/below a sibling, or into a group (middle zone) */
   const reparentDrop = (dragId, target, zone) => {
-    const D = app.doc;
-    if (dragId === target.id) return;
-    const locT = D.locate(target.id);
-    const locD = D.locate(dragId);
-    if (!locT || !locD) return;
-    if (zone === 'into') {
-      if (target.type !== 'group') return;
-      if (D.isDescendantOf(target.id, dragId)) { app.toast("CAN'T NEST A GROUP INSIDE ITSELF", true); return; }
-      const g = D.findLayer(target.id);
-      g.expanded = true;
-      D.reparent(dragId, target.id, g.children.length, 'Move into group');
-      return;
-    }
-    const sameList = locT.list === locD.list;
-    // insertion index refers to the array after the drag node is removed
-    const ti = sameList && locD.index < locT.index ? locT.index - 1 : locT.index;
-    if (sameList) {
-      if (zone === 'above' && ti + 1 === locD.index) return;
-      if (zone === 'below' && ti === locD.index) return;
-    }
-    // visually above a row = deeper in the stack list; below = shallower
-    const parentId = locT.parent ? locT.parent.id : null;
-    D.reparent(dragId, parentId, zone === 'above' ? ti + 1 : ti, 'Reorder layer');
+    const result = app.doc.moveLayerRelative(dragId, target.id, zone);
+    if (result === 'cycle') app.toast("CAN'T NEST A GROUP INSIDE ITSELF", true);
+    if (result === 'depth') app.toast('LAYER GROUP NESTING LIMIT REACHED', true);
   };
 
   const renderRow = (node, depth) => {

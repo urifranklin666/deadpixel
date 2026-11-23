@@ -3,7 +3,8 @@
    Format v3 stores a layer tree (groups, layer masks, clipping); documents that use
    none of those features still serialize as v2 for maximum compatibility. */
 
-import { Doc, Layer, TextLayer, GroupLayer, AdjustLayer, makeCanvas, flattenLayers, MAX_TREE_DEPTH } from './engine.js';
+import { Doc, Layer, TextLayer, GroupLayer, AdjustLayer, makeCanvas } from './engine.js';
+import { flattenLayers, MAX_TREE_DEPTH } from './layer-tree.js';
 
 const FORMAT_VERSION = 4;
 const MAX_DIMENSION = 32768;
@@ -349,15 +350,14 @@ export async function docFromFiles(files) {
     if (Number.isFinite(le.signalSeed)) layer.signalSeed = le.signalSeed >>> 0;
   };
 
+  let activeLayer;
   if (meta.version >= 3) {
-    const buildNode = async (le, depth) => {
+    const buildNode = async (le) => {
       let layer;
       if (le.type === 'group') {
         layer = new GroupLayer();
         layer.name = le.name;
         layer.expanded = le.expanded !== false;
-        layer.children = [];
-        for (const child of le.children || []) layer.children.push(await buildNode(child, depth + 1));
       } else if (le.type === 'adjust') {
         layer = new AdjustLayer(le.filter, le.params && { ...le.params }, le.name);
       } else if (le.type === 'text') {
@@ -370,6 +370,10 @@ export async function docFromFiles(files) {
           layer.ctx.drawImage(img, 0, 0);
         }
       }
+      if (!activeLayer && le.id === meta.activeId) activeLayer = layer;
+      if (layer.type === 'group') {
+        for (const child of le.children || []) layer.children.push(await buildNode(child));
+      }
       applyCommon(layer, le);
       layer.clipped = !!le.clipped;
       if (le.mask && files['masks/' + le.mask + '.png']) {
@@ -380,7 +384,7 @@ export async function docFromFiles(files) {
       }
       return layer;
     };
-    for (const le of meta.layersTree) doc.layers.push(await buildNode(le, 0));
+    for (const le of meta.layersTree) doc.layers.push(await buildNode(le));
   } else {
     for (const le of meta.layers) {
       let layer;
@@ -400,8 +404,7 @@ export async function docFromFiles(files) {
   }
   if (!doc.layers.length) doc.layers.push(new Layer(meta.width, meta.height, 'Background'));
   if (meta.version >= 3) {
-    const flat = flattenLayers(doc.layers);
-    doc._activeId = flat.find(l => l.id === meta.activeId)?.id ?? flat[flat.length - 1]?.id ?? null;
+    doc.setActiveId((activeLayer ?? doc.flatLayers.at(-1))?.id);
   } else {
     doc.activeIndex = Math.min(meta.activeIndex || 0, doc.layers.length - 1);
   }

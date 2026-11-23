@@ -5,15 +5,17 @@
 import { blurAlpha, growAlpha } from './pixelops.js';
 import { makeCanvas, copyCanvas } from './canvas.js';
 import { Compositor, adjustDefaults } from './compositor.js';
+import {
+  flattenLayers, countLeaves, locateLayer, fitsAtDepth, indexBeside, captureTopology, restoreTopology,
+} from './layer-tree.js';
 
 export { makeCanvas, copyCanvas } from './canvas.js';
 export { setAdjustFilters } from './compositor.js';
+export { flattenLayers, countLeaves, MAX_TREE_DEPTH } from './layer-tree.js';
 
 let _uid = 1;
 export const uid = () => 'L' + (_uid++) + '_' + Date.now().toString(36);
 export const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
-
-export const MAX_TREE_DEPTH = 8;
 
 export const BLEND_MODES = [
   ['pass-through', 'Pass Through'], ['source-over', 'Normal'], ['multiply', 'Multiply'], ['screen', 'Screen'],
@@ -230,22 +232,6 @@ export class AdjustLayer {
     return c;
   }
   contains(id) { return id === this.id; }
-}
-
-export function flattenLayers(list, out = []) {
-  for (const l of list) { out.push(l); if (l.type === 'group') flattenLayers(l.children, out); }
-  return out;
-}
-
-export function countLeaves(list) {
-  let n = 0;
-  for (const l of list) n += l.type === 'group' ? countLeaves(l.children) : 1;
-  return n;
-}
-
-/* shallow structural clone: new arrays + new group wrappers, shared leaf objects */
-function cloneLevel(list) {
-  return list.map(l => l.type === 'group' ? new GroupLayer().assign(l) : l);
 }
 
 /* --------------------------------------------------------------- history */
@@ -478,20 +464,8 @@ export class Doc extends EventTarget {
 
   /* ----------------------------- tree walking ----------------------------- */
   get flatLayers() { return flattenLayers(this.layers); }
-  findLayer(id) { return id == null ? null : flattenLayers(this.layers).find(l => l.id === id) || null; }
-  locate(id) { // {list, index, parent} — parent null for root
-    const search = (list, parent) => {
-      for (let i = 0; i < list.length; i++) {
-        if (list[i].id === id) return { list, index: i, parent };
-        if (list[i].type === 'group') {
-          const hit = search(list[i].children, list[i]);
-          if (hit) return hit;
-        }
-      }
-      return null;
-    };
-    return search(this.layers, null);
-  }
+  findLayer(id) { return this.locate(id)?.node ?? null; }
+  locate(id) { return id == null ? null : locateLayer(this.layers, id); }
   isDescendantOf(id, ancestorId) {
     const a = this.findLayer(ancestorId);
     return !!(a && a.type === 'group' && a.contains(id));
@@ -568,11 +542,11 @@ export class Doc extends EventTarget {
 
   /* ---- structural ops (history-recorded) ---- */
   _snapshotTree() {
-    return { root: cloneLevel(this.layers), idx: this.activeIndex };
+    return { root: captureTopology(this.layers), activeId: this.activeLayer?.id ?? null };
   }
   _restoreTree(s) {
-    this.layers = cloneLevel(s.root);
-    this.activeIndex = s.idx;
+    this.layers = restoreTopology(s.root);
+    this._activeId = s.activeId;
     this.changed(true);
   }
   _structural(label, mutate) {
@@ -584,11 +558,12 @@ export class Doc extends EventTarget {
   }
 
   /* flat index helpers used by legacy commands */
-  _locateActive() { return this.locate(this._activeId) || { list: this.layers, index: 0, parent: null }; }
+  _locateActive() { return this.locate(this._activeId) || { list: this.layers, index: 0, parent: null, depth: 0 }; }
 
   addLayer(layer = null, name = null) {
-    const { list, index } = this._locateActive();
+    const { list, index, depth } = this._locateActive();
     const l = layer || new Layer(this.width, this.height, name || 'Layer ' + (countLeaves(this.layers) + 1));
+    if (!fitsAtDepth(l, depth)) return null;
     this._structural('New layer', () => {
       list.splice(index + 1, 0, l);
       this._activeId = l.id;
@@ -597,8 +572,9 @@ export class Doc extends EventTarget {
   }
 
   addGroup(name = null) { // empty group placed above the active node
-    const { list, index } = this._locateActive();
+    const { list, index, depth } = this._locateActive();
     const g = new GroupLayer(name || 'Group ' + (this.layers.filter(l => l.type === 'group').length + 1));
+    if (!fitsAtDepth(g, depth)) return null;
     this._structural('New group', () => {
       list.splice(index + 1, 0, g);
       this._activeId = g.id;
@@ -632,8 +608,9 @@ export class Doc extends EventTarget {
   }
 
   groupFromActive() { // Ctrl+G: put the active node into a new group
-    const { list, index } = this._locateActive();
+    const { list, index, depth } = this._locateActive();
     const active = list[index];
+    if (!active || !fitsAtDepth(active, depth + 1)) return null;
     const g = new GroupLayer('Group ' + (this.layers.filter(l => l.type === 'group').length + 1));
     this._structural('Group layer', () => {
       g.children.push(active);
@@ -678,43 +655,56 @@ export class Doc extends EventTarget {
     });
   }
 
-  reparent(id, parentId = null, index = 0, label = 'Reorder layer') {
-    const at = this.locate(id);
-    if (!at) return false;
-    if (parentId != null && (parentId === id || this.isDescendantOf(parentId, id))) return false;
-    const parent = parentId == null ? null : this.findLayer(parentId);
-    if (parentId != null && (!parent || parent.type !== 'group')) return false;
-    const target = parentId == null ? this.layers : parent.children;
+  _moveNode(source, { parent, depth, index }, label, expand = false) {
+    const node = source.node;
+    if (parent && (parent === node || this.isDescendantOf(parent.id, node.id))) return 'cycle';
+    if (!fitsAtDepth(node, depth)) return 'depth';
+
+    const target = parent ? parent.children : this.layers;
+    const sameList = target === source.list;
+    const insertAt = clamp(index, 0, target.length - Number(sameList));
+    if (sameList && insertAt === source.index) return 'unchanged';
     this._structural(label, () => {
-      const [l] = at.list.splice(at.index, 1);
-      target.splice(clamp(index, 0, target.length), 0, l);
-      this._activeId = l.id;
+      source.list.splice(source.index, 1);
+      target.splice(insertAt, 0, node);
+      if (expand) parent.expanded = true;
+      this._activeId = node.id;
     });
-    return true;
+    return 'moved';
   }
 
-  /* legacy flat-index move (kept for command compatibility).
-     Semantics match array splice: remove at `from`, insert at `to`
-     in the flattened DFS order of the tree. */
+  reparent(id, parentId = null, index = 0, label = 'Reorder layer') {
+    const source = this.locate(id);
+    const parent = this.locate(parentId);
+    if (!source || (parentId != null && parent?.node.type !== 'group')) return false;
+    const result = this._moveNode(source, {
+      parent: parent?.node ?? null, depth: parent ? parent.depth + 1 : 0, index,
+    }, label);
+    return result === 'moved' || result === 'unchanged';
+  }
+
+  moveLayerRelative(id, targetId, zone) {
+    const source = this.locate(id), target = this.locate(targetId);
+    if (!source || !target || id === targetId) return 'unchanged';
+    if (zone === 'into') {
+      if (target.node.type !== 'group') return 'unchanged';
+      return this._moveNode(source, {
+        parent: target.node, depth: target.depth + 1, index: target.node.children.length,
+      }, 'Move into group', true);
+    }
+    if (zone !== 'above' && zone !== 'below') return 'unchanged';
+    return this._moveNode(source, {
+      parent: target.parent, depth: target.depth, index: indexBeside(source, target, zone === 'above'),
+    }, 'Reorder layer');
+  }
+
+  /* Legacy flat-index moves insert after the anchor when moving up the stack. */
   moveLayer(from, to) {
     const flat = this.flatLayers;
     if (from < 0 || from >= flat.length || to < 0 || to >= flat.length || from === to) return;
-    const moved = flat[from], anchor = flat[to];
-    const insertAfter = to > from;
-    this._structural('Reorder layer', () => {
-      const loc0 = this.locate(moved.id);
-      loc0.list.splice(loc0.index, 1);
-      let list, index;
-      if (anchor.type === 'group' && insertAfter) {
-        list = anchor.children; index = 0;
-      } else {
-        const locA = this.locate(anchor.id);
-        list = locA.list;
-        index = locA.index + (insertAfter ? 1 : 0);
-      }
-      list.splice(clamp(index, 0, list.length), 0, moved);
-      this._activeId = moved.id;
-    });
+    const source = flat[from], anchor = flat[to];
+    if (to > from && anchor.type === 'group') this.reparent(source.id, anchor.id);
+    else this.moveLayerRelative(source.id, anchor.id, to > from ? 'above' : 'below');
   }
 
   mergeDown(id = null) {
@@ -994,14 +984,14 @@ export class Doc extends EventTarget {
   _geoSnapshot() {
     return {
       w: this.width, h: this.height,
-      root: cloneLevel(this.layers),
+      root: captureTopology(this.layers),
       masks: new Map([...this.signalMasks].map(([id, data]) => [id, new Uint8ClampedArray(data)])),
       idx: this.activeIndex,
     };
   }
   _geoRestore(s) {
     this.width = s.w; this.height = s.h;
-    this.layers = cloneLevel(s.root);
+    this.layers = restoreTopology(s.root);
     this.signalMasks = new Map([...s.masks].map(([id, data]) => [id, new Uint8ClampedArray(data)]));
     this.activeIndex = s.idx;
     this.selection = null;
