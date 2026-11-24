@@ -48,6 +48,7 @@ class App {
   /* ------------------------------ doc ------------------------------ */
   attachDoc(doc) {
     this.doc = doc;
+    this.maskPaint = null;
     this.setMaskTarget(false);
     this.setQuickMask(false);
     doc.effectProcessor = (canvas, effects, seed, cache) => processSignalStack(canvas, doc.effectsWithMasks(effects), seed, cache);
@@ -69,7 +70,15 @@ class App {
       history.replaceState(null, '', location.pathname + location.search);
       this.toast('SHARED RECIPE PATCHED IN · IMAGE STAYED LOCAL');
     }
-    doc.addEventListener('change', (e) => {
+    let maskRevision = doc.maskRevision;
+    doc.addEventListener('change', () => {
+      if (this.doc === doc) {
+        this._syncMaskPainting();
+        if (maskRevision !== doc.maskRevision) {
+          maskRevision = doc.maskRevision;
+          this.refreshSignalMasks?.();
+        }
+      }
       this.requestRender();
       this.refreshTitle();
       this._layersDirty = true;
@@ -658,24 +667,43 @@ class App {
 
   /* ------------------------------ input wiring ------------------------------ */
   beginMaskPainting(maskId) {
-    const alpha = this.doc?.signalMasks.get(maskId); if (!alpha) return;
-    const canvas = makeCanvas(this.doc.width, this.doc.height), ctx = canvas.getContext('2d', { willReadFrequently: true }), image = ctx.createImageData(this.doc.width, this.doc.height);
+    if (!this.doc?.signalMasks.has(maskId)) return;
+    this.maskPaint = { maskId };
+    this._syncMaskPainting();
+    this.toast('PAINT MASK ON IMAGE · ALT ERASES · ENTER TO FINISH · ESC TO EXIT');
+    this.requestRender();
+  }
+  _syncMaskPainting(discardStroke = false) {
+    const session = this.maskPaint;
+    if (!session) return;
+    const D = this.doc, alpha = D.signalMasks.get(session.maskId);
+    if (!alpha) { this.maskPaint = null; return; }
+    if (!discardStroke && session.source === alpha && session.revision === D.maskRevision) return;
+    const canvas = session.canvas || makeCanvas(D.width, D.height);
+    if (canvas.width !== D.width) canvas.width = D.width;
+    if (canvas.height !== D.height) canvas.height = D.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const image = ctx.createImageData(D.width, D.height);
     for (let i = 0; i < alpha.length; i++) image.data.set([255, 34, 51, alpha[i]], i * 4);
-    ctx.putImageData(image, 0, 0); this.maskPaint = { maskId, alpha, canvas, ctx, drawing: false };
-    this.toast('PAINT MASK ON IMAGE · ALT ERASES · [ ] SIZE · ENTER TO FINISH'); this.requestRender();
+    ctx.putImageData(image, 0, 0);
+    Object.assign(session, { canvas, ctx, source: alpha, revision: D.maskRevision, drawing: false });
   }
   _dabMask(pt, erase = false) {
     const session = this.maskPaint; if (!session) return;
+    session.drawing = true;
     const radius = Math.max(1, this.brush.size / 2), gradient = session.ctx.createRadialGradient(pt.x, pt.y, radius * .6, pt.x, pt.y, radius);
-    gradient.addColorStop(0, erase ? 'rgba(255,34,51,1)' : 'rgba(255,34,51,1)'); gradient.addColorStop(1, 'rgba(255,34,51,0)');
+    gradient.addColorStop(0, 'rgba(255,34,51,1)'); gradient.addColorStop(1, 'rgba(255,34,51,0)');
     session.ctx.save(); session.ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over'; session.ctx.fillStyle = gradient; session.ctx.beginPath(); session.ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2); session.ctx.fill(); session.ctx.restore();
     this.requestRender();
   }
   _commitMaskPaint(finish = false) {
     const session = this.maskPaint; if (!session) return;
-    const rgba = session.ctx.getImageData(0, 0, this.doc.width, this.doc.height).data;
-    for (let i = 0; i < session.alpha.length; i++) session.alpha[i] = rgba[i * 4 + 3];
-    this.doc.maskRevision++; this.doc.changed();
+    if (session.drawing) {
+      session.drawing = false;
+      const rgba = session.ctx.getImageData(0, 0, session.canvas.width, session.canvas.height).data;
+      const alpha = Uint8ClampedArray.from(session.source, (_, i) => rgba[i * 4 + 3]);
+      this.doc.paintSignalMask(session.maskId, alpha);
+    }
     if (finish) { this.maskPaint = null; this.toast('PAINT MASK APPLIED'); }
     this.requestRender();
   }
@@ -706,6 +734,7 @@ class App {
           const m = pinchMetrics();
           gestureActive = true;
           pinch = { ...m, zoom: this.view.zoom, panX: this.view.panX, panY: this.view.panY };
+          if (this.maskPaint?.drawing) this._syncMaskPainting(true);
           this.tool?.onUp?.(this, pt, e);
           this.viewport.classList.add('panning');
           return;
@@ -719,7 +748,7 @@ class App {
       }
       if (e.button === 2) return;
       if (!this.doc) return;
-      if (this.maskPaint) { this.maskPaint.drawing = true; this._dabMask(pt, e.altKey); return; }
+      if (this.maskPaint) { this._dabMask(pt, e.altKey); return; }
       this.tool?.onDown?.(this, pt, e);
       this.requestRender();
     });
@@ -778,11 +807,12 @@ class App {
       const r = vc.getBoundingClientRect();
       const sx = e.clientX - r.left, sy = e.clientY - r.top;
       const [x, y] = this.screenToDoc(sx, sy);
-      if (this.maskPaint) { this.maskPaint.drawing = false; this._commitMaskPaint(false); return; }
+      if (this.maskPaint) { this._commitMaskPaint(); return; }
       this.tool?.onUp?.(this, { x, y, sx, sy, pressure: e.pressure || .5 }, e);
       this.requestRender();
     });
     vc.addEventListener('pointercancel', (e) => {
+      if (this.maskPaint?.drawing) { this._syncMaskPainting(true); this.requestRender(); }
       touchPoints.delete(e.pointerId);
       if (!touchPoints.size) { pinch = null; gestureActive = false; this.viewport.classList.remove('panning'); }
     });
@@ -827,7 +857,12 @@ class App {
     document.addEventListener('keydown', (e) => {
       if (e.target.matches('input,textarea,select,[contenteditable]')) return;
       if (e.code === 'Space' && !e.repeat) { this.spaceDown = true; this.viewport.classList.add('tool-hand'); }
-      if (this.maskPaint && (e.key === 'Enter' || e.key === 'Escape')) { e.preventDefault(); this._commitMaskPaint(true); return; }
+      if (this.maskPaint && (e.key === 'Enter' || e.key === 'Escape')) {
+        e.preventDefault();
+        if (e.key === 'Enter') this._commitMaskPaint(true);
+        else { this.maskPaint = null; this.requestRender(); }
+        return;
+      }
 
       // tool-level key handling first (Enter/Esc for crop, lasso, transform)
       if (this.tool?.onKey?.(this, e)) { e.preventDefault(); return; }

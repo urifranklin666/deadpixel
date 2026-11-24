@@ -1,5 +1,5 @@
 /* DEADPIXEL service worker — offline-first, versioned cache. */
-const VERSION = 'dp-v2.0.0-2';
+const VERSION = 'dp-v2.0.0-3';
 const CORE = [
   './', 'index.html', 'css/ui.css',
   'js/main.js', 'js/engine.js', 'js/canvas.js', 'js/compositor.js', 'js/layer-tree.js', 'js/brushes.js', 'js/tools.js', 'js/pixelops.js',

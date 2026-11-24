@@ -1333,7 +1333,8 @@ function buildActionsPanel(app, host) {
   const userActions = () => JSON.parse(localStorage.getItem('deadpixel.actions') || '[]');
   const saveUserActions = (a) => localStorage.setItem('deadpixel.actions', JSON.stringify(a));
   const clone = (v) => JSON.parse(JSON.stringify(v));
-  let snapshots = { a: null, b: null }, showing = null;
+  const snapshots = { a: null, b: null };
+  let showing = null;
   const target = () => {
     const D = app.doc;
     return scopeSel.value === 'layer' ? D?.activeLayer : D;
@@ -1352,15 +1353,12 @@ function buildActionsPanel(app, host) {
 
   const editMask = async (effectIndex) => {
     const D = app.doc, T = target(); if (!D || !T) return;
-    let effect = T.effects[effectIndex];
-    if (!effect.maskId || !D.signalMasks.has(effect.maskId)) {
-      const id = D.createSignalMask(true);
-      changeStack('Create paint mask', stack => { stack[effectIndex].mask = 'raster'; stack[effectIndex].maskId = id; });
-      effect = target().effects[effectIndex];
-    }
-    const alpha = D.signalMasks.get(effect.maskId);
-    const max = 480, scale = Math.min(1, max / Math.max(D.width, D.height));
-    const w = Math.max(1, Math.round(D.width * scale)), h = Math.max(1, Math.round(D.height * scale));
+    const effect = T.effects[effectIndex];
+    const existing = D.signalMasks.get(effect.maskId);
+    const alpha = existing || D.signalMaskSeed();
+    const { width, height } = D, revision = D.maskRevision;
+    const max = 480, scale = Math.min(1, max / Math.max(width, height));
+    const w = Math.max(1, Math.round(width * scale)), h = Math.max(1, Math.round(height * scale));
     await dialog('PAINT SIGNAL MASK', bodyEl => {
       const source = makeCanvas(D.width, D.height), sctx = source.getContext('2d'), src = sctx.createImageData(D.width, D.height);
       for (let i = 0; i < alpha.length; i++) src.data.set([255, 255, 255, alpha[i]], i * 4);
@@ -1375,8 +1373,9 @@ function buildActionsPanel(app, host) {
       const feather = el('input'); feather.type = 'range'; feather.min = 0; feather.max = 100; feather.value = 25;
       tools.append(el('span', null, 'MODE'), mode, el('span', null, 'SIZE'), size, el('span', null, 'DENSITY'), density, el('span', null, 'FEATHER'), feather);
       bodyEl.append(canvas, tools, el('div', 'dlg-note', 'White reveals the module; black protects the image. A selection seeds new masks.'));
-      let drawing = false;
+      let drawing = false, edited = false;
       const dab = e => {
+        edited = true;
         const r = canvas.getBoundingClientRect(), x = (e.clientX - r.left) * w / r.width, y = (e.clientY - r.top) * h / r.height;
         const radius = Number(size.value) / 2, soft = Number(feather.value) / 100;
         const gradient = ctx.createRadialGradient(x, y, radius * (1 - soft), x, y, radius);
@@ -1388,10 +1387,15 @@ function buildActionsPanel(app, host) {
       canvas.addEventListener('pointermove', e => { if (drawing) dab(e); });
       canvas.addEventListener('pointerup', () => { drawing = false; });
       return { commit: () => {
-        sctx.clearRect(0, 0, D.width, D.height); sctx.drawImage(canvas, 0, 0, D.width, D.height);
-        const pixels = sctx.getImageData(0, 0, D.width, D.height).data;
-        for (let i = 0; i < alpha.length; i++) alpha[i] = pixels[i * 4 + 3];
-        D.maskRevision++; D.changed(); app.requestRender();
+        if (app.doc !== D || target() !== T || T.effects[effectIndex] !== effect ||
+            D.width !== width || D.height !== height || D.maskRevision !== revision) return;
+        if (!edited) {
+          if (!existing) D.setPaintedSignalMask(T, effectIndex, alpha);
+          return;
+        }
+        sctx.clearRect(0, 0, width, height); sctx.drawImage(canvas, 0, 0, width, height);
+        const pixels = sctx.getImageData(0, 0, width, height).data;
+        D.setPaintedSignalMask(T, effectIndex, Uint8ClampedArray.from(alpha, (_, i) => pixels[i * 4 + 3]));
       } };
     }, [{ label: 'Cancel' }, { label: 'Apply', primary: true, value: ctl => { ctl.commit(); return true; } }]);
     refreshActive();
@@ -1417,17 +1421,20 @@ function buildActionsPanel(app, host) {
   });
   const storeSnapshot = (slot) => {
     const T = target(); if (!T) return;
-    snapshots[slot] = { effects: clone(T.effects), seed: T.signalSeed };
+    snapshots[slot] = app.doc.captureSignalRack(T);
     toast('SIGNAL SNAPSHOT ' + slot.toUpperCase() + ' STORED');
   };
   snapABtn.addEventListener('click', () => storeSnapshot('a'));
   snapBBtn.addEventListener('click', () => storeSnapshot('b'));
   compareABtn.addEventListener('click', () => {
-    const D = app.doc; if (!D) return;
+    const D = app.doc, T = target(); if (!D || !T) return;
     const slot = showing === 'a' ? 'b' : 'a';
     if (!snapshots[slot]) { toast('STORE SNAPSHOT ' + slot.toUpperCase() + ' FIRST', true); return; }
+    if (!D.recallSignalRack(T, snapshots[slot], 'Recall snapshot ' + slot.toUpperCase())) {
+      toast('SNAPSHOT MASKS NEED THE ORIGINAL CANVAS SIZE', true);
+      return;
+    }
     showing = slot;
-    replaceTarget(snapshots[slot].effects, 'Recall snapshot ' + slot.toUpperCase(), snapshots[slot].seed);
     compareABtn.textContent = 'SHOW ' + (slot === 'a' ? 'B' : 'A');
     refreshActive(); app.requestRender();
   });
@@ -1465,8 +1472,13 @@ function buildActionsPanel(app, host) {
     catch (_) { prompt('COPY RECIPE LINK', url); }
   });
 
+  let renderedTarget = null;
   const refreshActive = () => {
     const D = app.doc, T = target();
+    const openEffects = renderedTarget === T
+      ? new Set([...activeList.querySelectorAll('.rack-module.open')].map(element => element.dataset.effect))
+      : new Set();
+    renderedTarget = T;
     activeList.innerHTML = '';
     const effects = T?.effects || [];
     seedBox.querySelector('code').textContent = T ? T.signalSeed.toString(16).padStart(8, '0').toUpperCase() : '00000000';
@@ -1476,6 +1488,8 @@ function buildActionsPanel(app, host) {
       const f = filterById(effect.filter);
       if (!f) return;
       const module = el('article', 'rack-module' + (effect.enabled === false ? ' bypassed' : ''));
+      module.dataset.effect = effect.id ?? index;
+      if (openEffects.has(module.dataset.effect)) module.classList.add('open');
       const top = el('div', 'rack-module-top');
       const power = el('button', 'rack-power', effect.enabled === false ? '○' : '●'); power.title = 'bypass module';
       const title = el('button', 'rack-module-name', `${String(index + 1).padStart(2, '0')}  ${f.name}`);
@@ -1523,19 +1537,15 @@ function buildActionsPanel(app, host) {
         pctx.putImageData(image, 0, 0); thumb.getContext('2d').drawImage(preview, 0, 0, thumb.width, thumb.height);
         thumb.addEventListener('click', () => editMask(index));
         paintView.title = 'paint this mask directly over the image'; paintView.addEventListener('click', () => app.beginMaskPainting(effect.maskId));
-        duplicate.addEventListener('click', () => {
-          const id = D.createSignalMask(false); D.signalMasks.set(id, new Uint8ClampedArray(alpha));
-          changeStack('Duplicate paint mask', stack => { stack[index].mask = 'raster'; stack[index].maskId = id; });
-        });
+        duplicate.addEventListener('click', () => D.setPaintedSignalMask(T, index, alpha, { duplicate: true }));
         soften.addEventListener('click', () => {
           const src = makeCanvas(D.width, D.height), sctx = src.getContext('2d'), srcImage = sctx.createImageData(D.width, D.height);
           for (let i = 0; i < alpha.length; i++) srcImage.data.set([255, 255, 255, alpha[i]], i * 4);
           sctx.putImageData(srcImage, 0, 0); const out = makeCanvas(D.width, D.height), octx = out.getContext('2d', { willReadFrequently: true });
           octx.filter = 'blur(4px)'; octx.drawImage(src, 0, 0); const rgba = octx.getImageData(0, 0, D.width, D.height).data;
-          for (let i = 0; i < alpha.length; i++) alpha[i] = rgba[i * 4 + 3];
-          D.maskRevision++; D.changed(); app.requestRender(); refreshActive();
+          D.paintSignalMask(effect.maskId, Uint8ClampedArray.from(alpha, (_, i) => rgba[i * 4 + 3]), 'Soften signal mask');
         });
-        remove.addEventListener('click', () => { const id = effect.maskId; changeStack('Delete paint mask', stack => { stack[index].mask = null; delete stack[index].maskId; }); D.signalMasks.delete(id); D.maskRevision++; });
+        remove.addEventListener('click', () => D.deletePaintedSignalMask(T, index));
         maskTools.append(thumb, paintView, duplicate, soften, remove); controls.appendChild(maskTools);
       }
       for (const param of f.params) {
@@ -1563,6 +1573,7 @@ function buildActionsPanel(app, host) {
       activeList.appendChild(module);
     });
   };
+  app.refreshSignalMasks = refreshActive;
 
   const refresh = () => {
     list.innerHTML = '';

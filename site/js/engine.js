@@ -433,6 +433,8 @@ export class Selection {
 
 /* ------------------------------------------------------------------- doc */
 
+const cloneSignalEffects = effects => JSON.parse(JSON.stringify(effects || []));
+
 export class Doc extends EventTarget {
   constructor(w, h, opts = {}) {
     super();
@@ -480,15 +482,75 @@ export class Doc extends EventTarget {
   setActiveId(id) { if (this.findLayer(id)) this._activeId = id; }
 
   /* ------------------------ non destructive rack -------------------------- */
-  createSignalMask(fromSelection = true) {
-    const id = 'M' + uid();
+  signalMaskSeed(fromSelection = true) {
     const data = new Uint8ClampedArray(this.width * this.height);
     if (fromSelection && this.selection) {
       const pixels = this.selection.mctx.getImageData(0, 0, this.width, this.height).data;
       for (let i = 0; i < data.length; i++) data[i] = pixels[i * 4 + 3];
     } else data.fill(255);
-    this.signalMasks.set(id, data);
+    return data;
+  }
+
+  createSignalMask(fromSelection = true) {
+    const id = 'M' + uid();
+    this.signalMasks.set(id, this.signalMaskSeed(fromSelection));
     return id;
+  }
+
+  paintSignalMask(id, alpha, label = 'Paint signal mask') {
+    const current = this.signalMasks.get(id);
+    if (!current || alpha.length !== this.width * this.height ||
+        current.length !== alpha.length || current.every((value, i) => value === alpha[i])) return false;
+    this.#recordSignalChange(label, null, null, null, new Map([[id, alpha]]));
+    return true;
+  }
+
+  setPaintedSignalMask(owner, index, alpha, { duplicate = false } = {}) {
+    const effect = owner?.effects?.[index];
+    if (!effect || alpha.length !== this.width * this.height) return false;
+    if (!duplicate && this.signalMasks.has(effect.maskId)) return this.paintSignalMask(effect.maskId, alpha);
+    const id = 'M' + uid();
+    const effects = owner.effects.slice();
+    effects[index] = { ...effect, mask: 'raster', maskId: id };
+    this.#recordSignalChange(duplicate ? 'Duplicate paint mask' : 'Paint signal mask',
+      owner, effects, owner.signalSeed, new Map([[id, alpha]]));
+    return true;
+  }
+
+  deletePaintedSignalMask(owner, index) {
+    const effect = owner?.effects?.[index];
+    if (!effect?.maskId) return;
+    const effects = owner.effects.slice();
+    const { maskId, ...unmasked } = effect;
+    effects[index] = { ...unmasked, mask: null };
+    this.#recordSignalChange('Delete paint mask', owner, effects, owner.signalSeed);
+  }
+
+  captureSignalRack(owner) {
+    const effects = cloneSignalEffects(owner.effects);
+    const masks = new Map();
+    for (const { maskId } of effects) {
+      if (this.signalMasks.has(maskId) && !masks.has(maskId)) {
+        masks.set(maskId, this.signalMasks.get(maskId).slice());
+      }
+    }
+    return { effects, masks, seed: owner.signalSeed, width: this.width, height: this.height };
+  }
+
+  recallSignalRack(owner, snapshot, label) {
+    if (snapshot.masks.size && (snapshot.width !== this.width || snapshot.height !== this.height)) return false;
+    const ids = new Map(), masks = new Map();
+    for (const [originalId, alpha] of snapshot.masks) {
+      const id = 'M' + uid();
+      ids.set(originalId, id);
+      masks.set(id, alpha);
+    }
+    const effects = snapshot.effects.map(effect => {
+      const id = ids.get(effect.maskId);
+      return id ? { ...effect, maskId: id } : effect;
+    });
+    this.#recordSignalChange(label, owner, effects, snapshot.seed, masks);
+    return true;
   }
 
   effectsWithMasks(effects) {
@@ -520,24 +582,56 @@ export class Doc extends EventTarget {
   }
 
   replaceEffects(next, label = 'Signal rack', nextSeed = this.signalSeed) {
-    const clone = (v) => JSON.parse(JSON.stringify(v));
-    const before = clone(this.effects), after = clone(next);
-    const beforeSeed = this.signalSeed >>> 0, afterSeed = nextSeed >>> 0;
-    const apply = (value, seed) => { this.effects = clone(value); this.signalSeed = seed; this.changed(); };
-    this.history.push(label, () => apply(before, beforeSeed), () => apply(after, afterSeed));
-    apply(after, afterSeed);
+    this.#recordSignalChange(label, this, next, nextSeed);
   }
 
   replaceLayerEffects(layer, next, label = 'Layer signal rack', nextSeed = layer.signalSeed) {
     if (!layer) return;
-    const clone = (v) => JSON.parse(JSON.stringify(v));
-    const before = clone(layer.effects || []), after = clone(next);
-    const beforeSeed = layer.signalSeed >>> 0, afterSeed = nextSeed >>> 0;
-    const apply = (value, seed) => {
-      layer.effects = clone(value); layer.signalSeed = seed; this.changed();
+    this.#recordSignalChange(label, layer, next, nextSeed);
+  }
+
+  #recordSignalChange(label, owner, effects, seed, updates = new Map()) {
+    const before = owner && { effects: cloneSignalEffects(owner.effects), seed: owner.signalSeed >>> 0 };
+    const after = owner && { effects: cloneSignalEffects(effects), seed: seed >>> 0 };
+    const maskLinks = state => state?.effects.map(effect => effect.maskId).filter(Boolean) || [];
+    const beforeLinks = maskLinks(before), afterLinks = maskLinks(after);
+    const removed = new Set(beforeLinks.filter(id => !afterLinks.includes(id) && this.signalMasks.has(id)));
+    if (removed.size) {
+      for (const rack of [this, ...this.flatLayers]) {
+        if (rack === owner) continue;
+        for (const { maskId } of rack.effects || []) removed.delete(maskId);
+      }
+      for (const id of removed) updates.set(id, null);
+    }
+    const changes = [...updates].map(([id, alpha]) => ({
+      id, before: this.signalMasks.get(id)?.slice(), after: alpha?.slice(),
+    }));
+    const sameLink = (effect, other) => {
+      if (effect.mask !== 'raster' && !effect.maskId) return true;
+      return effect.maskId === other?.maskId && effect.mask === other?.mask;
     };
-    this.history.push(label, () => apply(before, beforeSeed), () => apply(after, afterSeed));
-    apply(after, afterSeed);
+    const linksChanged = owner && (
+      before.effects.some((effect, i) => !sameLink(effect, after.effects[i])) ||
+      after.effects.some((effect, i) => !sameLink(effect, before.effects[i]))
+    );
+    const apply = (state, side) => {
+      if (owner) {
+        owner.effects = cloneSignalEffects(state.effects);
+        owner.signalSeed = state.seed;
+      }
+      for (const change of changes) {
+        const alpha = change[side], current = this.signalMasks.get(change.id);
+        if (!alpha) this.signalMasks.delete(change.id);
+        else if (current?.length === alpha.length) current.set(alpha);
+        else this.signalMasks.set(change.id, alpha.slice());
+      }
+      if (changes.length || linksChanged) this.maskRevision++;
+      this.changed();
+    };
+    const bytes = changes.reduce((sum, change) =>
+      sum + (change.before?.byteLength || 0) + (change.after?.byteLength || 0), 0);
+    this.history.push(label, () => apply(before, 'before'), () => apply(after, 'after'), { bytes });
+    apply(after, 'after');
   }
 
   /* ---- structural ops (history-recorded) ---- */

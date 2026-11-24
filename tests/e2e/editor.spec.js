@@ -552,6 +552,133 @@ test('painted masks can be edited directly over the document view', async ({ pag
   expect(painted.active).toBe(false);
 });
 
+test('deleting a Signal Rack mask preserves shared coverage and restores the last attachment on undo', async ({ page }) => {
+  await page.evaluate(async () => {
+    const { Doc } = await import('/js/engine.js');
+    const app = window.deadpixel, doc = new Doc(64, 64, { bg: '#222222' });
+    app.attachDoc(doc);
+    const maskId = doc.createSignalMask(false);
+    doc.signalMasks.get(maskId)[0] = 127;
+    doc.replaceEffects([{ id: 'document', filter: 'invert', mask: 'raster', maskId }]);
+    doc.replaceLayerEffects(doc.activeLayer, [{ id: 'layer', filter: 'invert', mask: 'raster', maskId }]);
+    app.refreshActions();
+  });
+  await page.getByRole('button', { name: 'SIGNAL' }).last().click();
+  await page.locator('.rack-module-name').click();
+  await page.getByRole('button', { name: 'DELETE', exact: true }).click();
+  expect(await page.evaluate(() => {
+    const doc = window.deadpixel.doc;
+    return doc.signalMasks.get(doc.activeLayer.effects[0].maskId)[0];
+  })).toBe(127);
+  await page.locator('.rack-scope').selectOption('layer');
+  await page.locator('.rack-module-name').click();
+  await page.getByRole('button', { name: 'DELETE', exact: true }).click();
+  expect(await page.evaluate(() => window.deadpixel.doc.signalMasks.size)).toBe(0);
+  await page.keyboard.press('Control+z');
+  await expect(page.getByRole('button', { name: 'DELETE', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => {
+    const doc = window.deadpixel.doc;
+    return doc.signalMasks.get(doc.activeLayer.effects[0].maskId)[0];
+  })).toBe(127);
+  await page.keyboard.press('Control+Shift+z');
+  expect(await page.evaluate(() => window.deadpixel.doc.signalMasks.size)).toBe(0);
+});
+
+test('A/B snapshots preserve painted coverage and DUP separates a shared mask', async ({ page }) => {
+  await page.evaluate(async () => {
+    const { Doc } = await import('/js/engine.js');
+    const app = window.deadpixel, doc = new Doc(64, 64);
+    app.attachDoc(doc);
+    const maskId = doc.createSignalMask(false);
+    doc.signalMasks.get(maskId)[0] = 127;
+    doc.replaceEffects(['first', 'second'].map(id => ({ id, filter: 'invert', mask: 'raster', maskId })));
+    app.refreshActions();
+  });
+  await page.getByRole('button', { name: 'SIGNAL' }).last().click();
+  await page.getByRole('button', { name: 'SET A', exact: true }).click();
+  await page.evaluate(() => {
+    const doc = window.deadpixel.doc, { maskId } = doc.effects[0];
+    const coverage = doc.signalMasks.get(maskId).slice();
+    coverage[0] = 31;
+    doc.paintSignalMask(maskId, coverage);
+  });
+  await page.getByRole('button', { name: 'SET B', exact: true }).click();
+  const maskState = () => page.evaluate(() => {
+    const doc = window.deadpixel.doc, [first, second] = doc.effects;
+    return { shared: first.maskId === second.maskId, values: doc.effects.map(effect => doc.signalMasks.get(effect.maskId)[0]) };
+  });
+  await page.getByRole('button', { name: 'SHOW A', exact: true }).click();
+  expect(await maskState()).toEqual({ shared: true, values: [127, 127] });
+  await page.locator('.rack-module-name').first().click();
+  await page.getByRole('button', { name: 'DUP', exact: true }).click();
+  expect(await maskState()).toEqual({ shared: false, values: [127, 127] });
+  await page.getByRole('button', { name: 'SHOW B', exact: true }).click();
+  expect(await maskState()).toEqual({ shared: true, values: [31, 31] });
+});
+
+test('one completed mask stroke is reversible and Escape drops an unfinished stroke', async ({ page }) => {
+  const points = await page.evaluate(async () => {
+    const { Doc } = await import('/js/engine.js');
+    const app = window.deadpixel, doc = new Doc(64, 64);
+    app.attachDoc(doc);
+    const maskId = doc.createSignalMask(false);
+    doc.signalMasks.get(maskId).fill(0);
+    doc.replaceEffects([{ id: 'paint', filter: 'invert', mask: 'raster', maskId }]);
+    app.brush.size = 12;
+    app.refreshActions();
+    const rect = app.viewCanvas.getBoundingClientRect();
+    return [[16, 16], [48, 48]].map(([x, y]) => {
+      const [sx, sy] = app.docToScreen(x, y);
+      return [rect.left + sx, rect.top + sy];
+    });
+  });
+  await page.getByRole('button', { name: 'SIGNAL' }).last().click();
+  await page.locator('.rack-module-name').click();
+  await page.locator('.rack-mask-tools').getByRole('button', { name: 'VIEW', exact: true }).click();
+  await page.mouse.click(...points[0]);
+  await page.mouse.move(...points[1]);
+  await page.mouse.down();
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  const state = () => page.evaluate(() => {
+    const { doc, maskPaint } = window.deadpixel;
+    const alpha = doc.signalMasks.get(doc.effects[0].maskId);
+    return { coverage: [alpha[16 * 64 + 16], alpha[48 * 64 + 48]], painting: !!maskPaint, history: doc.history.index };
+  });
+  expect(await state()).toEqual({ coverage: [255, 0], painting: false, history: 1 });
+  await page.keyboard.press('Control+z');
+  expect(await state()).toEqual({ coverage: [0, 0], painting: false, history: 0 });
+  await page.keyboard.press('Control+Shift+z');
+  expect(await state()).toEqual({ coverage: [255, 0], painting: false, history: 1 });
+});
+
+test('mask dialog Cancel leaves the rack alone and Apply records one edit', async ({ page }) => {
+  await page.evaluate(async () => {
+    const { Doc } = await import('/js/engine.js');
+    const app = window.deadpixel;
+    app.attachDoc(new Doc(64, 64));
+    app.doc.replaceEffects([{ id: 'paint', filter: 'invert', mask: 'raster' }]);
+    app.refreshActions();
+  });
+  await page.getByRole('button', { name: 'SIGNAL' }).last().click();
+  await page.locator('.rack-module-name').click();
+  const edit = page.locator('.rack-controls').getByRole('button', { name: 'EDIT', exact: true });
+  const state = () => page.evaluate(() => {
+    const doc = window.deadpixel.doc;
+    return { coverage: doc.signalMasks.get(doc.effects[0].maskId)?.[0], history: doc.history.index };
+  });
+  await edit.click();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(await state()).toEqual({ coverage: undefined, history: 0 });
+  await edit.click();
+  await page.getByRole('button', { name: 'Apply', exact: true }).click();
+  expect(await state()).toEqual({ coverage: 255, history: 1 });
+  await page.keyboard.press('Control+z');
+  expect(await state()).toEqual({ coverage: undefined, history: 0 });
+  await page.keyboard.press('Control+Shift+z');
+  expect(await state()).toEqual({ coverage: 255, history: 1 });
+});
+
 test('editor shell fits desktop and compact viewports', async ({ page }) => {
   for (const size of [{ width: 1440, height: 900 }, { width: 900, height: 600 }]) {
     await page.setViewportSize(size);
