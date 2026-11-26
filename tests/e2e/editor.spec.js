@@ -263,9 +263,9 @@ test('Navigator and Histogram panels paint live document views', async ({ page }
     const navCtx = document.getElementById('nav-canvas').getContext('2d');
     const center = navCtx.getImageData(130, 86, 1, 1).data;
     const boxCtx = document.getElementById('nav-rect').getContext('2d');
-    const blue = boxCtx.getImageData(0, 0, 260, 172).data;
-    let blueCount = 0;
-    for (let i = 2; i < blue.length; i += 4) if (blue[i] > 90 && blue[i - 2] < 90) blueCount++;
+    const px = boxCtx.getImageData(0, 0, 260, 172).data;
+    let accentCount = 0; // viewport box strokes in the signal red accent
+    for (let i = 0; i < px.length; i += 4) if (px[i] > 200 && px[i + 1] < 90 && px[i + 2] < 90 && px[i + 3] > 0) accentCount++;
     const zoomPct = document.querySelector('#panel-navigator .nav-ctrl .opt-val').textContent;
 
     app.activatePanelMode('histogram'); // sets _histogramDirty
@@ -277,14 +277,14 @@ test('Navigator and Histogram panels paint live document views', async ({ page }
     const info = document.querySelector('#panel-histogram .hist-info').textContent;
     return {
       navCenterAlpha: center[3], navCenterRed: center[0],
-      blueCount, zoomPct, histBars, info,
+      accentCount, zoomPct, histBars, info,
       panelTabs: Array.from(document.querySelectorAll('.panel-tabs button')).map(b => b.textContent),
     };
   });
-  // navigator thumbnail shows the red square; viewport box strokes blue; zoom readout live
+  // navigator thumbnail shows the red square; viewport box strokes in the accent; zoom readout live
   expect(result.navCenterAlpha).toBeGreaterThan(128);
   expect(result.navCenterRed).toBeGreaterThan(150);
-  expect(result.blueCount).toBeGreaterThan(20);
+  expect(result.accentCount).toBeGreaterThan(20);
   expect(result.zoomPct).toMatch(/%$/);
   // histogram bars present; mean/median of #e02020 luminance ≈ 89
   expect(result.histBars).toBeGreaterThan(50);
