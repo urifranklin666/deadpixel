@@ -201,7 +201,7 @@ T({
     const [x1, y1] = app.docToScreen(Math.min(this.a.x, this.b.x), Math.min(this.a.y, this.b.y));
     const [x2, y2] = app.docToScreen(Math.max(this.a.x, this.b.x), Math.max(this.a.y, this.b.y));
     ctx.save();
-    ctx.strokeStyle = '#0d84ff'; ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
+    ctx.strokeStyle = '#ff3428'; ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
     if (this.state.shape === 'ellipse') {
       ctx.beginPath();
       ctx.ellipse((x1 + x2) / 2, (y1 + y2) / 2, (x2 - x1) / 2, (y2 - y1) / 2, 0, 0, Math.PI * 2);
@@ -251,7 +251,7 @@ T({
   drawOverlay(app, ctx) {
     if (!this.pts || !this.pts.length) return;
     ctx.save();
-    ctx.strokeStyle = '#0d84ff'; ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
+    ctx.strokeStyle = '#ff3428'; ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
     ctx.beginPath();
     this.pts.forEach((p, i) => {
       const [sx, sy] = app.docToScreen(p.x, p.y);
@@ -475,9 +475,9 @@ T({
     const W = ctx.canvas.width, H = ctx.canvas.height;
     ctx.fillRect(0, 0, W, y1); ctx.fillRect(0, y2, W, H - y2);
     ctx.fillRect(0, y1, x1, y2 - y1); ctx.fillRect(x2, y1, W - x2, y2 - y1);
-    ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#ff3428'; ctx.lineWidth = 1.5;
     ctx.strokeRect(x1 + .5, y1 + .5, x2 - x1, y2 - y1);
-    ctx.font = '600 12px system-ui, sans-serif'; ctx.fillStyle = '#0d84ff';
+    ctx.font = '600 12px system-ui, sans-serif'; ctx.fillStyle = '#ff3428';
     ctx.fillText(`${this.rect.w}×${this.rect.h}`, x1 + 6, y1 - 6);
     ctx.restore();
   },
@@ -710,7 +710,7 @@ T({
     if (this.src) {
       const [sx, sy] = app.docToScreen(this.src.x, this.src.y);
       ctx.save();
-      ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1;
+      ctx.strokeStyle = '#ff3428'; ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(sx - 6, sy); ctx.lineTo(sx + 6, sy);
       ctx.moveTo(sx, sy - 6); ctx.lineTo(sx, sy + 6);
@@ -1091,7 +1091,7 @@ T({
     const [x1, y1] = app.docToScreen(this.a.x, this.a.y);
     const [x2, y2] = app.docToScreen(this.b.x, this.b.y);
     ctx.save();
-    ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = '#ff3428'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
     ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
     ctx.restore();
   },
@@ -1173,7 +1173,7 @@ T({
   drawOverlay(app, ctx) {
     if (!this.a) return;
     ctx.save();
-    ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = '#ff3428'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
     ctx.beginPath();
     const sa = app.docToScreen(this.a.x, this.a.y), sb = app.docToScreen(this.b.x, this.b.y);
     this.path(ctx, { x: sa[0], y: sa[1] }, { x: sb[0], y: sb[1] });
@@ -1279,7 +1279,7 @@ T({
     if (!this.pts) return;
     ctx.save();
     // sampled path
-    ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1.2;
+    ctx.strokeStyle = '#ff3428'; ctx.lineWidth = 1.2;
     ctx.beginPath();
     this.samplePath().forEach((pt, i) => {
       const [sx, sy] = app.docToScreen(pt.x, pt.y);
@@ -1302,13 +1302,13 @@ T({
       if (a.curved) {
         const [cx, cy] = app.docToScreen(a.cx, a.cy);
         const [ix, iy] = app.docToScreen(2 * a.x - a.cx, 2 * a.y - a.cy);
-        ctx.strokeStyle = 'rgba(13,132,255,.6)'; ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(255,52,40,.6)'; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(ix, iy); ctx.lineTo(cx, cy); ctx.stroke();
       }
       const size = i === 0 && !this.closed ? 6 : 4;
-      ctx.fillStyle = this.closed ? '#0d84ff' : '#050505';
+      ctx.fillStyle = this.closed ? '#ff3428' : '#050505';
       ctx.beginPath(); ctx.arc(ax, ay, size / 2 + .5, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = i === 0 && !this.closed ? '#fff' : '#0d84ff';
+      ctx.strokeStyle = i === 0 && !this.closed ? '#fff' : '#ff3428';
       ctx.stroke();
     }
     ctx.restore();
@@ -1629,7 +1629,7 @@ export const transformTool = {
     if (!this.layer) return;
     const pts = this.corners().map(pt => app.docToScreen(pt.x, pt.y));
     ctx.save();
-    ctx.strokeStyle = '#0d84ff'; ctx.lineWidth = 1.2; ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = '#ff3428'; ctx.lineWidth = 1.2; ctx.setLineDash([5, 4]);
     ctx.beginPath();
     pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
     ctx.closePath();

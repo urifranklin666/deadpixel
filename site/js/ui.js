@@ -1717,7 +1717,7 @@ function buildNavigatorPanel(app, host) {
     const x0 = (Math.max(0, -panX / zoom)) * m.scale + m.ox;
     const y0 = (Math.max(0, -panY / zoom)) * m.scale + m.oy;
     const w = Math.min(m.w, vw * m.scale), h = Math.min(m.h, vh * m.scale);
-    ctx.strokeStyle = '#0d84ff';
+    ctx.strokeStyle = '#ff3428';
     ctx.strokeRect(x0 + .5, y0 + .5, w - 1, h - 1);
     zoomPct.textContent = Math.round(zoom * 100) + '%';
   };
