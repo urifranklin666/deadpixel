@@ -86,7 +86,9 @@ body {
 /* --------------------------------------------------------------------------
    frame
    -------------------------------------------------------------------------- */
-#app { display: flex; flex-direction: column; height: 100vh; height: 100svh; }
+#app { display: flex; flex-direction: column; height: calc(100vh - var(--sg-bar-h, 32px)); height: calc(100svh - var(--sg-bar-h, 32px)); }
+/* Collapsed strip is 4px tall; --sg-bar-h stays 32px, so size the frame to the real bar. */
+body:has(#sg-bar[data-sg-collapsed="true"]) #app { height: calc(100vh - 4px); height: calc(100svh - 4px); }
 #damage-dock { display: none; }
 
 #menubar {
